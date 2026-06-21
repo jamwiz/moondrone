@@ -49,7 +49,7 @@ export const PRESET_VOICE_GAINS = {
   Shruti: [0.065, 0.38, 0.14, 0, 0.032, 0],
   Strings: [0.19, 0.36, 0.10, 0.015, 0.015, 0.01],
   Choir: [0.045, 0.41, 0.30, 0.25, 0.17, 0.07],
-  Cosmos: [0.045, 0.32, 0.19, 0.23, 0.28, 0.14],
+  Cosmos: [0.045, 0.30, 0.18, 0.20, 0.23, 0.11],
   Binaural: [0.062, 0.44, 0.19, 0.10, 0.055, 0.025],
 }
 
@@ -112,9 +112,9 @@ export const DEFAULT_PRESET = PRESETS.find((preset) => preset.name === 'Shruti')
 
 // Cosmos-only sky layers (indices 8–10 in engine). Raise for more float; lower for less buzz.
 export const COSMOS_EXTENSION_GAINS = {
-  celestial: 0.048,
-  skyRoot: 0.03,
-  skyOctave: 0.026,
+  celestial: 0.042,
+  skyRoot: 0.026,
+  skyOctave: 0.022,
 }
 
 // Foundation root multiplier (Shruti High/Very High, Cosmos). Lower → less low-mid weight.
@@ -313,19 +313,19 @@ export const COSMOS_TUNING = {
   highIntensityStart: 0.65,
   highIntensityRange: 0.35,
   highIntensityCurvePower: 1.1,
-  filterFocusDamping: 0.1,
-  layerFocusDamping: 0.35,
+  filterFocusDamping: 0.12,
+  layerFocusDamping: 0.4,
   softenedPresenceMix: 0.72,
-  extensionFocusDamping: 0.45,
+  extensionFocusDamping: 0.5,
   extensionPresenceBase: 0.002,
   extensionCharacterScale: 0.12,
   extensionFocusScale: 0.22,
   upperLayerSoftening: {
     basePerIndex: 0.24,
     indexStep: 0.04,
-    celestial: 0.38,
-    skyRoot: 0.42,
-    skyOctave: 0.45,
+    celestial: 0.42,
+    skyRoot: 0.46,
+    skyOctave: 0.48,
   },
 }
 
@@ -351,7 +351,7 @@ export const PRESET_BALANCE_TRIM_DB = {
   // Moon-wide output trim — level-match Io/Mimas/Europa without altering voice balance.
   Strings: 1.4,
   Choir: -1.25,
-  Cosmos: -1.75,
+  Cosmos: -1.6,
   // Gentle static level match / beat headroom — not a live master-stage jump (see droneEngine).
   Binaural: -1.5,
 }
@@ -409,6 +409,14 @@ export const PRESET_AIR_SHIMMER_GAIN_SCALE = {
       [REGISTER_OCTAVES.VERY_HIGH]: 0.28,
     },
   },
+  // Io: soften AIR bed / shelf / partials — keep airy identity, less wispy forward shimmer.
+  Cosmos: {
+    default: 0.86,
+    register: {
+      [REGISTER_OCTAVES.HIGH]: 0.82,
+      [REGISTER_OCTAVES.VERY_HIGH]: 0.76,
+    },
+  },
 }
 
 // Mimas (Pure) + Europa (Shruti): compress AIR/wind/shimmer only at high Breath slider.
@@ -444,10 +452,10 @@ export const PRESET_MOON_PHASE_HARMONICS_GAIN_SCALE = {
     },
   },
   Cosmos: {
-    default: 1,
+    default: 0.84,
     register: {
-      [REGISTER_OCTAVES.HIGH]: 0.9,
-      [REGISTER_OCTAVES.VERY_HIGH]: 0.85,
+      [REGISTER_OCTAVES.HIGH]: 0.76,
+      [REGISTER_OCTAVES.VERY_HIGH]: 0.70,
     },
   },
 }
@@ -486,9 +494,10 @@ export const PRESET_REGISTER_VOICE_GAIN_SCALE = {
     [REGISTER_OCTAVES.HIGH]: { 1: 0.88, 3: 0.88, 4: 0.55 },
     [REGISTER_OCTAVES.VERY_HIGH]: { 0: 0.58, 1: 0.24, 3: 1.75, 4: 0.26 },
   },
-  // Io: Very High +12 octave body only (~−1.3 dB); sky extensions untouched.
+  // Io: ease upper/sky harmonic layers at High/VH — body + extensions stay spacious.
   Cosmos: {
-    [REGISTER_OCTAVES.VERY_HIGH]: { 3: 0.86 },
+    [REGISTER_OCTAVES.HIGH]: { 3: 0.92, 4: 0.86, 5: 0.84 },
+    [REGISTER_OCTAVES.VERY_HIGH]: { 3: 0.84, 4: 0.80, 5: 0.76 },
   },
   // Titan: High/VH principle gain trim; VH upper bloom unchanged from prior pass.
   Strings: {
@@ -552,6 +561,12 @@ export const PRESET_INTENSITY_TUNING = {
     brightUpperMaxEffectiveUi: 58,
     brightUpperCompressionPower: 2.8,
     resonanceScale: 0.48,
+  },
+  // Io: default Intensity ~70 feels less piercing — harmonics soften above the knee.
+  Cosmos: {
+    amountScale: 0.94,
+    softCeilingUi: 65,
+    aboveCeilingContribution: 0.32,
   },
 }
 
@@ -1085,7 +1100,7 @@ export const AIR_SHIMMER_TUNING = {
     Shruti: 1,
     Strings: 1.04,
     Choir: 1.03,
-    Cosmos: 1.05,
+    Cosmos: 1,
   },
 
   // (4) Custom harmonic partials on selected layers (replaces pure sine). Values are
@@ -1100,9 +1115,9 @@ export const AIR_SHIMMER_TUNING = {
       4: [1, 0.065, 0.02],
     },
     Cosmos: {
-      3: [1, 0.06, 0.025],
-      4: [1, 0.075, 0.028],
-      5: [1, 0.05, 0.016],
+      3: [1, 0.05, 0.02],
+      4: [1, 0.058, 0.022],
+      5: [1, 0.038, 0.012],
     },
     Choir: {
       1: [1, 0.02],
@@ -1134,7 +1149,7 @@ export const AIR_SHIMMER_TUNING = {
       Shruti: 1,
       Strings: 0.36,
       Choir: 0.9,
-      Cosmos: 1.1,
+      Cosmos: 0.92,
       Binaural: 0,
     },
     // Longer ramps on the breath-noise bed reduce steppiness between breath ticks.
