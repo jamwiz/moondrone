@@ -1,5 +1,6 @@
 import UIKit
 import Capacitor
+import AVFoundation
 
 @UIApplicationMain
 class AppDelegate: UIResponder, UIApplicationDelegate {
@@ -7,8 +8,20 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Override point for customization after application launch.
+        configureAudioSessionForPlayback()
         return true
+    }
+
+    /// Playback category ignores the hardware Ring/Silent switch so Moondrone is audible
+    /// after the user taps Play. Does not start audio — WebAudio/Tone.js still waits for Play.
+    private func configureAudioSessionForPlayback() {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .default, options: [])
+            try session.setActive(true)
+        } catch {
+            print("Failed to configure AVAudioSession:", error)
+        }
     }
 
     func applicationWillResignActive(_ application: UIApplication) {

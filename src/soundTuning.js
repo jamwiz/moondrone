@@ -1433,6 +1433,28 @@ export const TRANSITION_TUNING = {
   binauralUndertoneExitFadeOutSeconds: 0.35,
 
   volumeRampSeconds: 0.25,
+
+  // Titan-only micro headroom dip during high-intensity note/register switching.
+  // Every audible Titan param (voice gains, oscillator frequency, breath-follow, drift,
+  // air/shimmer/scoop, orbit/dual beats) already ramps on a note/register change, so the
+  // tick is NOT a snap — it is the master saturator/limiter catching the brief combined
+  // peak while the outgoing and incoming Titan voice sets overlap (two incoherent, rich,
+  // near-ceiling signals raise the crest factor for the duration of the crossfade). This
+  // is a tiny, smooth headroom dip on the whole-drone-bus group fader (idle at unity during
+  // note/register changes) that holds across the outgoing-fade overlap window, then restores
+  // to unity as the new note settles. NOT a permanent level cut, and never used during Moon
+  // transitions (the full-chain crossfade owns the group fader there). Only engages for
+  // Strings/Titan at high UI Intensity; disable with enabled: false.
+  stringsSwitchHeadroom: {
+    enabled: true,
+    intensityUiThreshold: 80, // UI Intensity at/above which the dip engages
+    dipDb: -1, // -0.5 to -1.5: depth of the momentary headroom dip
+    dipInSeconds: 0.05, // smooth ramp down into the dip
+    recoverSeconds: 0.18, // smooth ramp back to unity once the new note is settled
+    // Hold spans the outgoing-fade overlap automatically; this only bounds a degenerate
+    // (near-zero overlap) case so the dip is always at least this long before recovering.
+    minHoldSeconds: 0.06,
+  },
 }
 
 // =============================================================================

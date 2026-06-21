@@ -185,6 +185,7 @@ const BINAURAL_UNDERTONE_FADE_IN_DELAY_SECONDS = TRANSITION_TUNING.binauralUnder
 const BINAURAL_UNDERTONE_POST_TRANSITION_SETTLE_SECONDS = TRANSITION_TUNING.binauralUndertonePostTransitionSettleSeconds
 const BINAURAL_UNDERTONE_POST_TRANSITION_FADE_IN_SECONDS = TRANSITION_TUNING.binauralUndertonePostTransitionFadeInSeconds
 const BINAURAL_UNDERTONE_EXIT_FADE_OUT_SECONDS = TRANSITION_TUNING.binauralUndertoneExitFadeOutSeconds
+const STRINGS_SWITCH_HEADROOM = TRANSITION_TUNING.stringsSwitchHeadroom
 const BREATH_CYCLE_SECONDS = BREATH_TUNING.cycleSeconds
 const BREATH_UPDATE_SECONDS = BREATH_TUNING.updateSeconds
 const BREATH_OFFSET_DEPTH = BREATH_TUNING.offsetDepth
@@ -7344,6 +7345,51 @@ export class DroneEngine {
     this.rampGainCurved(this.moonTransitionGain.gain, targetValue, seconds, curve, startTime)
   }
 
+  // True only for a high-intensity Titan/Strings note/register switch — the one case where
+  // the outgoing + incoming voice sets (plus un-ducked aux layers) briefly sum hot enough to
+  // tick through the master saturator/limiter. Excludes Moon changes (presetChange), which own
+  // the group fader via the full-chain crossfade and must not be ducked here.
+  shouldApplyStringsSwitchHeadroomDip() {
+    return Boolean(
+      STRINGS_SWITCH_HEADROOM?.enabled
+      && this.isReady
+      && this.isPlaying
+      && this.moonTransitionGain
+      && this.isStringsPreset()
+      && this.intensity >= STRINGS_SWITCH_HEADROOM.intensityUiThreshold
+      // Never fight an in-flight Moon transition for the shared group fader.
+      && Tone.now() >= this.fullChainCrossfadeVoiceHoldUntil
+      && this.presetTransitionEndsAt <= Tone.now(),
+    )
+  }
+
+  // Microscopic, smooth headroom dip on the idle whole-drone-bus group fader, held across the
+  // note/register crossfade overlap (startTime -> overlapEndTime, the outgoing-fade window where
+  // both Titan voice sets are audible) and restored to unity as the new note settles. Pure
+  // headroom: Titan's tone and the audible crossfade timing are unchanged.
+  applyStringsSwitchHeadroomDip(startTime = Tone.now(), overlapEndTime = startTime) {
+    if (!this.shouldApplyStringsSwitchHeadroomDip()) {
+      return
+    }
+
+    const param = this.moonTransitionGain.gain
+    const dipLinear = Tone.dbToGain(STRINGS_SWITCH_HEADROOM.dipDb)
+    const dipInSeconds = STRINGS_SWITCH_HEADROOM.dipInSeconds
+    const recoverSeconds = STRINGS_SWITCH_HEADROOM.recoverSeconds
+    // Hold the dip until the outgoing voices have fully faded (overlap gone), with a floor so a
+    // near-zero overlap still gets a clean minimum hold before recovering.
+    const recoverStart = Math.max(
+      overlapEndTime,
+      startTime + dipInSeconds + STRINGS_SWITCH_HEADROOM.minHoldSeconds,
+    )
+
+    // Ramp down into the dip; it holds at dipLinear (no scheduled change in between), then anchors
+    // explicitly at dipLinear and recovers to unity so the future ramp starts from the held value
+    // rather than misreading the param's pre-schedule (unity) value.
+    this.rampGainCurved(param, dipLinear, dipInSeconds, 'smootherstep', startTime)
+    this.rampGainCurved(param, 1, recoverSeconds, 'smootherstep', recoverStart, dipLinear)
+  }
+
   // Simple Moon transition: optional transition tail (old drone melts into long reverb while
   // dry/core ducks, rebuilds, and new Moon fades in underneath). No overlap, no bridge tone.
   performSimpleMoonTransition(previousPresetName) {
@@ -9362,6 +9408,10 @@ export class DroneEngine {
       // left per-voice register scaling and master trim mismatched during the crossfade.
       this.applyVolume(registerRampSeconds)
       this.applyPresetBusEq(this.getBaseTonalAmount(), registerRampSeconds)
+
+      // Tiny headroom dip held across the high-intensity Titan crossfade overlap (no-op
+      // otherwise) — outgoing voices are fully gone by now + outgoingFadeDuration.
+      this.applyStringsSwitchHeadroomDip(now, now + outgoingFadeDuration)
     }
 
     if (this.noteChangeDebug && !presetChange) {
