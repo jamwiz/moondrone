@@ -204,15 +204,17 @@ function App() {
     setIsPlaying(false)
   }
 
+  function shouldForwardKeyToEngine() {
+    return isPlaying
+      || isStartingRef.current
+      || droneEngine.isPlaying
+      || droneEngine.isStarting
+  }
+
   async function handleKeyChange(key) {
     setSelectedKey(key)
 
-    if (isPlaying) {
-      droneEngine.setKey(key)
-      return
-    }
-
-    if (isStartingRef.current) {
+    if (shouldForwardKeyToEngine()) {
       droneEngine.setKey(key)
       return
     }
