@@ -1,13 +1,14 @@
 import { copyFileSync, existsSync, mkdirSync, unlinkSync } from 'node:fs'
 import { execSync } from 'node:child_process'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 
 const brandingDir = 'assets/branding'
 const androidResDir = 'android/app/src/main/res'
 const splashBackground = '#090807'
 
 const sources = {
-  icon: join(brandingDir, 'moondrone-icon.png'),
+  // Canonical Capacitor icon source (1024×1024). Copy from assets/UI/moon icon.png when updating.
+  icon: join(brandingDir, 'icon.png'),
   splashMaster: join(brandingDir, 'moondrone-splash-master.png'),
   splashIcon: join(brandingDir, 'moondrone-splash-icon-transparent.png'),
 }
@@ -39,21 +40,24 @@ function installAndroidSplashIcon() {
   copyFileSync(sources.splashIcon, join(drawableDir, 'splash_icon.png'))
 }
 
+if (!existsSync(sources.icon)) {
+  throw new Error(
+    `Missing app icon source: ${sources.icon}. Copy assets/UI/moon icon.png to assets/branding/icon.png first.`,
+  )
+}
+
 try {
-  // iOS: full icon + full-screen splash artwork.
-  stageTempFile(sources.icon, 'icon.png')
+  // iOS: permanent icon.png + staged full-screen splash artwork.
   stageTempFile(sources.splashMaster, 'splash.png')
   runGenerate(
     `--ios --assetPath ${brandingDir} --splashBackgroundColor ${splashBackground} --iconBackgroundColor ${splashBackground}`,
   )
   cleanupTempFiles()
 
-  // Android: app icons from the standard icon; splash uses transparent icon on dark background.
-  stageTempFile(sources.icon, 'icon.png')
+  // Android: same permanent icon.png; splash uses transparent icon on dark background.
   runGenerate(
     `--android --assetPath ${brandingDir} --splashBackgroundColor ${splashBackground} --iconBackgroundColor ${splashBackground} --splashBackgroundColorDark ${splashBackground} --iconBackgroundColorDark ${splashBackground}`,
   )
-  cleanupTempFiles()
 
   installAndroidSplashIcon()
 } catch (error) {
