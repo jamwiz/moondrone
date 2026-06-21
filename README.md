@@ -1,0 +1,127 @@
+# Moondrone
+
+Beautiful drones for practice and meditation.
+
+A mobile-first drone app for musicians, built with React, Vite, and Tone.js.
+
+## Moons
+
+- **Mimas** — clean, centered root focus
+- **Europa** — warm, grounded practice drone with register foundation roots
+- **Titan** — warm, bowed-string ensemble for intonation and practice
+- **Io** — vast, airy vertical space with Low-register foundation and sky layers
+- **Binaural** — centered main drone with quiet panned undertones for headphone beat listening
+
+Default Moon: **Europa** (internal sound ID: Shruti)
+
+## Phases
+
+For every non-Binaural Moon, **Phase** controls the slow movement behavior (internal sound code still uses `moodId` / `moods.js`):
+
+- **New** — stable reference, minimal movement
+- **Full** — clearly alive, warm harmonic bloom
+- **Blue** — floating, spacious, shimmering orbit
+- **Blood** — darker, deeper, stronger eclipse and body movement
+- **Super** — biggest, brightest, most radiant, with true dual headphone beats
+
+Binaural shows a **Beat** selector instead of the Phase menu (no helper text under the control).
+
+## UI Layout
+
+Single-screen, mobile-first layout optimized for phone screen space.
+
+**Compact status header** — no large title or decorative branding on the main screen (app icon/splash carry branding). Shows a Ready / Drone Active indicator on the left, with Atmosphere, Metronome, and `?` About/Help controls on the right.
+
+**Atmosphere** — manual background selection via the header button (Space, Desert, Forest). Not tied to Moon or Phase.
+
+**Moon-centered instrument:**
+
+- The moon is the single Play / Stop transport control (per-preset PNG artwork with CSS glow/halo/phase ring).
+- A Circle of Fifths key ring surrounds the moon.
+- Control deck top row: **Moon** | **Phase** (or **Beat** when Binaural is selected).
+- **Register** uses a compact 1×4 segmented row beneath that.
+- Moon and Phase use compact popovers; Binaural beat selector appears inline when Binaural is selected.
+- Intensity and Breath stay visible as primary shaping controls with subtle gold line icons.
+- Master Volume and Tuning are compact utility controls.
+- Metronome lives in a header popover with Tempo, Meter, Sound, and Play / Stop (Play is highlighted when stopped; Stop is subdued while the metronome runs).
+
+## Controls
+
+### Drone
+
+- Circle of Fifths key selector
+- Register selector (Low, Medium, High, Very High) in a compact 1×4 row
+- Moon popover
+- Phase popover for non-Binaural Moons
+- Tuning stepper (A = 415–445 Hz, default 440)
+- Binaural Beat selector inline when Binaural is selected (no on-screen helper note)
+- Moon Play / Stop control
+- Intensity and Breath sliders; reverb is fixed internally at a subtle level (no slider)
+- Compact Master Volume utility slider
+
+### Metronome
+
+Runs independently from the drone.
+
+- BPM slider (40–200, default 80)
+- Sound selector: Wood or Triangle
+- Meter selector: 2/4 through 6/4 plus **Straight (No Accent)** (default 4/4)
+- Play / Stop — Play highlighted when stopped; Stop subdued while playing
+
+Metronome samples live in `public/` (`block.high.mp3`, `block.low.mp3`, `triangle.open.mp3`, `triangle.closed.mp3`).
+
+## Audio Behavior
+
+- Play from stopped fades in over **4 seconds**; manual Stop fades out over **3 seconds** (lifecycle/background stop is immediate)
+- **Note and register** changes while playing use phased voice crossfades (no pitch glide). Breath phase is preserved; incoming voices fade to the live Breath voicing.
+- **Moon** changes while playing use **full-chain crossfade** by default: the entire current drone chain is captured as a frozen old deck, a brand-new complete chain is built for the new Moon, and the two decks are equal-power crossfaded at their output gains (**1.5 s**). The old deck stays fully audible until the new reverb IR is ready, then both ramps share one start time. A stable **masked** fallback (fade-down → silent rebuild → fade-up) remains available for debugging.
+- Settled Moon sound, master output, limiter/compressor, metronome, and note/register behavior are unchanged — only the transition path differs.
+- Projection is always enabled internally for phone-speaker clarity and perceived loudness; there is no Projection UI toggle, and no master-gain or limiter change.
+- First Play waits for reverb impulse response to load (prevents startup click/pop)
+- Master Volume UI shows 0–100% (default 100%); internal output is capped for clean phone speakers
+- On background, lock, or page hide: drone and metronome stop immediately; UI returns to Ready; settings are preserved; user must tap Play again (no background audio)
+
+### Dev transition controls (browser only)
+
+```js
+moondroneDebug.setMoonTransitionMode('fullChainCrossfade') // default
+moondroneDebug.setMoonTransitionMode('masked')             // stable fallback
+moondroneDebug.setFullChainCrossfadeDebug(true)            // lifecycle + resource probes
+moondroneDebug.setNoteChangeDebug(true)                    // note/register crossfade probes
+```
+
+## Documentation
+
+- `VISION.md` — product vision and constraints
+- `PROJECT_STATE.md` — current features and architecture snapshot
+- `SOUND_NOTES.md` — sound design goals and preset character
+- `TECH_NOTES.md` — engine architecture and implementation details
+- `src/toneLab.js` — Tone Lab macros for subjective tuning (master EQ, harmonics, dynamics; shared path for all Moons)
+- `ROADMAP.md` — milestone planning
+- `TODO.md` — app wrapping and device validation tasks
+- `CAPACITOR.md` — Capacitor setup and native build workflow
+
+## Development (Web)
+
+```bash
+npm install
+npm run dev
+```
+
+```bash
+npm run build
+npm run preview
+```
+
+## Mobile App (Capacitor)
+
+Moondrone is wrapped with Capacitor. The Vite build output (`dist/`) is synced into native `android/` and `ios/` projects.
+
+```bash
+npm run cap:sync              # build + sync web assets to native projects
+npm run cap:assets            # regenerate native icon/splash from branding sources
+npm run cap:open:android      # open in Android Studio
+npm run cap:open:ios          # open in Xcode (macOS only)
+```
+
+Branding source images live in `assets/branding/`. See `CAPACITOR.md` for full setup, asset generation, platform requirements, and workflow.

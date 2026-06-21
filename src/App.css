@@ -1,0 +1,1486 @@
+.app-shell {
+  position: relative;
+  width: 100%;
+  max-width: 100vw;
+  min-height: 100svh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: safe center;
+  padding:
+    max(20px, env(safe-area-inset-top))
+    max(20px, env(safe-area-inset-right))
+    max(20px, env(safe-area-inset-bottom))
+    max(20px, env(safe-area-inset-left));
+  overflow-x: hidden;
+}
+
+/* ---------- Atmosphere (background theme system) ---------- */
+
+.atmosphere {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.atmosphere-image {
+  position: absolute;
+  inset: 0;
+  background-repeat: no-repeat;
+  background-size: cover;
+  background-position: center center;
+  opacity: 0;
+  filter:
+    brightness(var(--atmosphere-brightness, 1.1))
+    contrast(var(--atmosphere-contrast, 1.05))
+    saturate(var(--atmosphere-saturate, 1.04));
+  transform: none;
+  transition: opacity 1.8s ease, filter 1.8s ease;
+  will-change: opacity;
+}
+
+.atmosphere-image[data-active='true'] {
+  opacity: var(--atmosphere-opacity, 0.58);
+}
+
+.atmosphere-scrim {
+  position: absolute;
+  inset: 0;
+  background: #000;
+  opacity: var(--atmosphere-scrim-opacity, 0.08);
+  transition: opacity 1.8s ease;
+}
+
+/* ---------- Layout ---------- */
+
+.app-stack {
+  position: relative;
+  z-index: 1;
+  width: min(100%, 430px);
+  max-width: 100%;
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 6px 0 10px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+}
+
+/* ---------- Header ---------- */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 6px;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--muted);
+  transition:
+    background 220ms ease,
+    box-shadow 220ms ease;
+}
+
+.status-indicator.active {
+  color: var(--gold);
+}
+
+.status-indicator.active .status-dot {
+  background: var(--gold);
+  box-shadow: 0 0 0 3px rgba(244, 191, 127, 0.18);
+}
+
+.header-info-button {
+  flex-shrink: 0;
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(20, 18, 24, 0.45);
+  backdrop-filter: blur(8px);
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1;
+  transition:
+    background 160ms ease,
+    color 160ms ease,
+    border-color 160ms ease;
+}
+
+.header-info-button:hover {
+  color: var(--text);
+  background: rgba(40, 36, 44, 0.6);
+  border-color: rgba(255, 255, 255, 0.24);
+}
+
+/* ---------- Atmosphere selector ---------- */
+
+.atmosphere-selector {
+  position: relative;
+}
+
+.atmosphere-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  color: var(--gold);
+  background: rgba(20, 18, 24, 0.45);
+  backdrop-filter: blur(8px);
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.atmosphere-trigger:hover,
+.atmosphere-trigger[aria-expanded='true'] {
+  border-color: rgba(244, 191, 127, 0.4);
+  background: rgba(40, 36, 44, 0.6);
+  box-shadow: 0 0 18px rgba(244, 191, 127, 0.16);
+}
+
+.atmosphere-trigger-symbol {
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.atmosphere-menu {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 168px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 20px;
+  background: rgba(18, 16, 22, 0.92);
+  backdrop-filter: blur(20px);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  animation: atmosphereMenuIn 180ms ease;
+}
+
+@keyframes atmosphereMenuIn {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.atmosphere-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 14px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.92rem;
+  font-weight: 600;
+  text-align: left;
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.atmosphere-option:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.atmosphere-option.selected {
+  color: var(--gold);
+  background: rgba(244, 191, 127, 0.12);
+}
+
+.atmosphere-option-symbol {
+  width: 18px;
+  font-size: 1rem;
+  text-align: center;
+}
+
+/* ---------- Instrument ---------- */
+
+.instrument {
+  width: 100%;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.moon-stage {
+  /* --intensity (0..1) is live from the slider; --breath (0..1) is visual-only
+     (breathVisual) and updates on slider release so breath animations stay stable
+     while dragging. No square overflow clip here: a rectangular clip (plus GPU layer
+     promotion via will-change) was producing a faint rectangular seam around
+     the moon. The glow/light-field layers are sized + faded (closest-side) to
+     stay within the stage on their own, so no clipping is needed. */
+  position: relative;
+  width: min(87vw, 344px);
+  max-width: 100%;
+  aspect-ratio: 1;
+  margin: 6px auto 2px;
+}
+
+/* ----- Radial light field: soft moonlight emanating around the moon ----- */
+
+.moon-light-field {
+  --lf-scale: calc((0.66 + 0.34 * var(--intensity, 0.7)) * var(--mv-bloom-size-factor, 1));
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 96%;
+  height: 96%;
+  transform: translate(-50%, -50%) scale(var(--lf-scale));
+  border-radius: 50%;
+  /* closest-side keeps the gradient a true circle that reaches full
+     transparency at its own edge — no square corners when clipped. */
+  background: radial-gradient(
+    circle closest-side,
+    rgba(var(--mv-bloom-inner-r, 250), var(--mv-bloom-inner-g, 212), var(--mv-bloom-inner-b, 158), calc((0.1 + 0.2 * var(--intensity, 0.7)) * var(--mv-bloom-opacity-factor, 1))) 0%,
+    rgba(var(--mv-bloom-outer-r, 246), var(--mv-bloom-outer-g, 195), var(--mv-bloom-outer-b, 131), calc((0.05 + 0.07 * var(--intensity, 0.7)) * var(--mv-bloom-opacity-factor, 1))) 42%,
+    transparent 100%
+  );
+  opacity: calc((0.08 + 0.13 * var(--intensity, 0.7)) * var(--mv-bloom-opacity-factor, 1));
+  pointer-events: none;
+  transition:
+    opacity 1.8s ease,
+    transform 900ms ease,
+    background 1.4s ease;
+}
+
+/* Bloom in over the 15s startup; out over ~2s on stop. */
+/* ----- Atmospheric haze: wide, soft outer veil (Blue spaciousness, Super overflow) ----- */
+
+.moon-haze {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 150%;
+  height: 150%;
+  transform: translate(-50%, -50%) scale(calc(0.8 + 0.3 * var(--intensity, 0.7)));
+  border-radius: 50%;
+  background: radial-gradient(
+    circle closest-side,
+    rgba(var(--mv-haze-r, 188), var(--mv-haze-g, 206), var(--mv-haze-b, 232), 0.5) 0%,
+    rgba(var(--mv-haze-r, 188), var(--mv-haze-g, 206), var(--mv-haze-b, 232), 0.16) 50%,
+    transparent 100%
+  );
+  opacity: calc(var(--mv-haze-opacity, 0) * (0.4 + 0.6 * var(--intensity, 0.7)));
+  pointer-events: none;
+  transition:
+    opacity 1.8s ease,
+    background 1.4s ease,
+    transform 900ms ease;
+}
+
+.moon-haze.playing {
+  opacity: calc(var(--mv-haze-opacity, 0) * (0.7 + 0.5 * var(--intensity, 0.7)));
+  transition:
+    opacity 6s ease,
+    background 1.4s ease,
+    transform 900ms ease;
+}
+
+.moon-light-field.playing {
+  opacity: calc((0.18 + 0.52 * var(--intensity, 0.7)) * var(--mv-bloom-opacity-factor, 1));
+  transition:
+    opacity 15s ease,
+    transform 900ms ease;
+}
+
+/* ----- Metronome pulse: one soft ripple per beat (pebble in still water) -----
+   Each beat remounts this element (keyed by beat tick in React), so the
+   animation plays exactly once per beat — no continuous looping. */
+
+.moon-pulse {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 54%;
+  height: 54%;
+  border-radius: 50%;
+  border: 1.5px solid rgba(248, 212, 162, 0.45);
+  transform: translate(-50%, -50%) scale(0.7);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.moon-pulse.downbeat {
+  border-color: rgba(248, 214, 166, 0.62);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .moon-pulse {
+    animation: moonPulse 1.4s cubic-bezier(0.22, 0.61, 0.36, 1) 1 both;
+  }
+}
+
+@keyframes moonPulse {
+  0% {
+    transform: translate(-50%, -50%) scale(0.7);
+    opacity: 0;
+    border-width: 2px;
+  }
+  14% {
+    opacity: 0.5;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1.9);
+    opacity: 0;
+    border-width: 0.5px;
+  }
+}
+
+.moon-orb {
+  /* Intensity drives glow strength + halo radius. Kept supportive — the glow
+     backs the moon rather than fogging over it. Moon + Phase tune via --mv-* vars. */
+  --glow-strength: calc((0.36 + 0.6 * var(--intensity, 0.7)) * var(--mv-glow-strength-factor, 1));
+  --glow-scale: calc((0.52 + 0.42 * var(--intensity, 0.7)) * var(--mv-glow-scale-factor, 1));
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 47%;
+  height: 47%;
+  padding: 0;
+  transform: translate(-50%, -50%);
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  box-shadow: none;
+  filter: none;
+  cursor: pointer;
+  transition: transform 220ms ease;
+}
+
+@media (hover: hover) {
+  .moon-orb:hover {
+    transform: translate(-50%, -50%) scale(1.02);
+  }
+}
+
+.moon-orb:active {
+  transform: translate(-50%, -50%) scale(0.98);
+}
+
+.moon-orb:focus-visible {
+  outline: none;
+}
+
+/* ----- Sphere body ----- */
+
+/* Per-preset moon artwork — oversized PNG with a gentle clip crop to remove
+   outer edge pixels / AA fringe; scale compensates so the disc stays full. */
+.moon-artwork {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 185%;
+  height: 185%;
+  transform: translate(-50%, -50%) scale(1.045);
+  object-fit: contain;
+  object-position: center;
+  display: block;
+  pointer-events: none;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  z-index: 1;
+  border-radius: 50%;
+  clip-path: circle(27.6% at 50% 50%);
+  filter: brightness(calc(var(--mv-luminance-idle, 0.58) + 0.10)) saturate(var(--mv-saturate-idle, 0.9)) contrast(0.92);
+  transition: filter 1.8s ease;
+}
+
+/* Luminance blooms in over the 15s startup fade; dims over ~2s on stop. */
+.moon-orb.playing .moon-artwork {
+  filter: brightness(calc(var(--mv-luminance-play-base, 0.94) + var(--mv-luminance-play-intensity, 0.34) * var(--intensity, 0.7) + 0.09)) saturate(var(--mv-saturate-play, 1.1)) contrast(0.96);
+  transition: filter 15s ease;
+}
+
+/* Dedicated Phase glow: centered behind the artwork, with no fill/border/ring. */
+.moon-phase-glow {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 98%;
+  height: 98%;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  box-shadow:
+    0 0 18px rgba(var(--mv-rim-glow-r, 255), var(--mv-rim-glow-g, 224), var(--mv-rim-glow-b, 168), calc(0.24 * var(--mv-rim-strength, 1))),
+    0 0 46px rgba(var(--mv-rim-glow-r, 255), var(--mv-rim-glow-g, 224), var(--mv-rim-glow-b, 168), calc(0.2 * var(--mv-rim-strength, 1))),
+    0 0 76px rgba(var(--mv-rim-glow-r, 255), var(--mv-rim-glow-g, 224), var(--mv-rim-glow-b, 168), calc(0.12 * var(--mv-rim-strength, 1)));
+  opacity: min(calc((0.42 + 0.22 * var(--intensity, 0.7)) * var(--mv-rim-strength, 1)), 0.78);
+  transition:
+    box-shadow 1.4s ease,
+    opacity 1.4s ease;
+}
+
+.moon-orb.playing .moon-phase-glow {
+  box-shadow:
+    0 0 22px rgba(var(--mv-rim-glow-r, 255), var(--mv-rim-glow-g, 224), var(--mv-rim-glow-b, 168), calc(0.32 * var(--mv-rim-strength, 1))),
+    0 0 58px rgba(var(--mv-rim-glow-r, 255), var(--mv-rim-glow-g, 224), var(--mv-rim-glow-b, 168), calc(0.24 * var(--mv-rim-strength, 1))),
+    0 0 92px rgba(var(--mv-rim-glow-r, 255), var(--mv-rim-glow-g, 224), var(--mv-rim-glow-b, 168), calc(0.14 * var(--mv-rim-strength, 1)));
+  opacity: min(calc((0.54 + 0.26 * var(--intensity, 0.7)) * var(--mv-rim-strength, 1)), 0.88);
+  transition:
+    box-shadow 15s ease,
+    opacity 15s ease;
+}
+
+/* ----- Glow / halo (Intensity = strength & radius, blooms over startup) ----- */
+
+.moon-orb-glow {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  /* ~stage diameter, centered on the moon; closest-side keeps it a clean
+     circle that fades fully to transparent before any clip boundary. */
+  width: 200%;
+  height: 200%;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle closest-side,
+    rgba(var(--mv-halo-inner-r, 251), var(--mv-halo-inner-g, 209), var(--mv-halo-inner-b, 148), calc(0.26 + 0.44 * var(--intensity, 0.7))) 0%,
+    rgba(var(--mv-halo-outer-r, 246), var(--mv-halo-outer-g, 192), var(--mv-halo-outer-b, 128), calc(0.1 + 0.13 * var(--intensity, 0.7))) 44%,
+    transparent 100%
+  );
+  /* Idle = reduced, dormant glow. */
+  opacity: calc((0.1 + 0.14 * var(--intensity, 0.7)) * var(--mv-glow-opacity-idle-factor, 1));
+  transform: translate(-50%, -50%) scale(var(--glow-scale));
+  transition:
+    opacity 1.8s ease,
+    transform 900ms ease,
+    background 1.4s ease;
+}
+
+.moon-orb.playing .moon-orb-glow {
+  opacity: calc(var(--glow-strength) * var(--mv-glow-opacity-play-factor, 1));
+  transition:
+    opacity 15s ease,
+    transform 900ms ease;
+}
+
+/* ----- Transport: gold play/stop icon on the lunar surface ----- */
+
+.moon-orb-transport {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+/* Embedded gold glyph — no plate, badge, or button background. */
+.moon-transport-icon {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 37%;
+  height: 37%;
+  color: var(--gold);
+  filter:
+    drop-shadow(0 0 7px rgba(244, 191, 127, 0.42))
+    drop-shadow(0 1px 2px rgba(18, 10, 4, 0.38));
+  transition:
+    color 220ms ease,
+    filter 220ms ease,
+    transform 220ms ease;
+}
+
+.moon-transport-icon-play {
+  transform: translate(-47%, -50%);
+}
+
+.moon-transport-icon:not(.moon-transport-icon-play) {
+  transform: translate(-50%, -50%);
+}
+
+@media (hover: hover) {
+  .moon-orb:hover .moon-artwork {
+    filter: brightness(calc(var(--mv-luminance-idle, 0.58) + 0.16)) saturate(calc(var(--mv-saturate-idle, 0.9) + 0.04)) contrast(0.92);
+  }
+
+  .moon-orb.playing:hover .moon-artwork {
+    filter: brightness(calc(var(--mv-luminance-play-base, 0.94) + var(--mv-luminance-play-intensity, 0.34) * var(--intensity, 0.7) + 0.13)) saturate(calc(var(--mv-saturate-play, 1.1) + 0.02)) contrast(0.96);
+  }
+
+  .moon-orb:hover .moon-orb-glow {
+    opacity: calc((0.16 + 0.2 * var(--intensity, 0.7)) * var(--mv-glow-opacity-idle-factor, 1));
+  }
+
+  .moon-orb.playing:hover .moon-orb-glow {
+    opacity: calc(var(--glow-strength) * var(--mv-glow-opacity-play-factor, 1) + 0.1);
+  }
+
+  .moon-orb:hover .moon-transport-icon,
+  .moon-orb:focus-visible .moon-transport-icon {
+    filter:
+      drop-shadow(0 0 11px rgba(244, 191, 127, 0.58))
+      drop-shadow(0 1px 2px rgba(18, 10, 4, 0.42));
+  }
+}
+
+.moon-orb:active .moon-artwork {
+  filter: brightness(calc(var(--mv-luminance-idle, 0.58) + 0.06)) saturate(calc(var(--mv-saturate-idle, 0.9) - 0.02)) contrast(0.90);
+}
+
+.moon-orb.playing:active .moon-artwork {
+  filter: brightness(calc(var(--mv-luminance-play-base, 0.94) + var(--mv-luminance-play-intensity, 0.34) * var(--intensity, 0.7) + 0.05)) saturate(calc(var(--mv-saturate-play, 1.1) - 0.04)) contrast(0.94);
+}
+
+/* ----- Breath = subtle glow/halo pulse during playback (no artwork resize) ----- */
+/* --breath on .moon-stage is visual-only (breathVisual) and updates on release,
+   not during slider drag, so keyframe amplitude stays stable while dragging. */
+
+@media (prefers-reduced-motion: no-preference) {
+  .moon-orb.playing .moon-orb-glow {
+    animation: moonGlowBreath 12s ease-in-out infinite;
+  }
+
+  .moon-orb.playing .moon-phase-glow {
+    animation: moonRingBreath 12s ease-in-out infinite;
+  }
+
+  .moon-light-field.playing {
+    animation: moonFieldBreath 12s ease-in-out infinite;
+  }
+}
+
+@keyframes moonGlowBreath {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) scale(var(--glow-scale));
+    opacity: calc(var(--glow-strength) * var(--mv-glow-opacity-play-factor, 1));
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(var(--glow-scale));
+    opacity: calc(
+      var(--glow-strength) * var(--mv-glow-opacity-play-factor, 1)
+      * (1 + 0.14 * var(--breath, 0.35) * var(--mv-breath-amplitude, 1))
+    );
+  }
+}
+
+@keyframes moonFieldBreath {
+  0%,
+  100% {
+    transform: translate(-50%, -50%) scale(var(--lf-scale));
+    opacity: calc((0.18 + 0.52 * var(--intensity, 0.7)) * var(--mv-bloom-opacity-factor, 1));
+  }
+  50% {
+    transform: translate(-50%, -50%) scale(var(--lf-scale));
+    opacity: calc(
+      (0.18 + 0.52 * var(--intensity, 0.7)) * var(--mv-bloom-opacity-factor, 1)
+      * (1 + 0.12 * var(--breath, 0.35) * var(--mv-breath-amplitude, 1))
+    );
+  }
+}
+
+@keyframes moonRingBreath {
+  0%,
+  100% {
+    opacity: min(calc((0.54 + 0.26 * var(--intensity, 0.7)) * var(--mv-rim-strength, 1)), 0.88);
+  }
+  50% {
+    opacity: min(
+      calc(
+        (0.54 + 0.26 * var(--intensity, 0.7)) * var(--mv-rim-strength, 1)
+        * (1 + 0.1 * var(--breath, 0.35) * var(--mv-breath-amplitude, 1))
+      ),
+      0.92
+    );
+  }
+}
+
+.note-ring {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.note-button {
+  pointer-events: auto;
+}
+
+.note-button {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 52px;
+  height: 52px;
+  min-height: 52px;
+  padding: 0;
+  transform: translate(-50%, -50%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 50%;
+  color: var(--text);
+  background: rgba(18, 16, 22, 0.5);
+  backdrop-filter: blur(6px);
+  line-height: 1;
+  transition:
+    background 200ms ease,
+    color 200ms ease,
+    border-color 200ms ease,
+    box-shadow 200ms ease,
+    transform 200ms ease;
+}
+
+.note-button .note-primary {
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.note-button .note-secondary {
+  margin-top: 1px;
+  font-size: 0.58rem;
+  font-weight: 600;
+  opacity: 0.66;
+}
+
+.note-button:hover {
+  border-color: rgba(244, 191, 127, 0.4);
+  background: rgba(40, 34, 30, 0.6);
+}
+
+.note-button.selected {
+  color: #1b1208;
+  border-color: transparent;
+  background: linear-gradient(135deg, #ffd29a, #f0a85b);
+  box-shadow:
+    0 0 22px 4px rgba(244, 191, 127, 0.5),
+    0 0 10px 1px rgba(244, 191, 127, 0.4);
+  transform: translate(-50%, -50%) scale(1.08);
+}
+
+.note-button.selected .note-secondary {
+  opacity: 0.8;
+}
+
+.note-ring.playing .note-button.selected {
+  box-shadow:
+    0 0 30px 7px rgba(244, 191, 127, 0.62),
+    0 0 14px 2px rgba(244, 191, 127, 0.5);
+}
+
+/* ---------- Control deck (compact single-screen controls) ---------- */
+
+.control-deck {
+  width: 100%;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.deck-top {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.deck-label {
+  display: block;
+  margin: 0 0 6px 2px;
+  color: var(--text);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.moon-block,
+.phase-block,
+.register-block {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.register-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 18px;
+  background: rgba(16, 14, 20, 0.42);
+  backdrop-filter: blur(8px);
+}
+
+.register-cell {
+  min-height: 38px;
+  padding: 0 2px;
+  border: 0;
+  border-radius: 13px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.1;
+  transition:
+    background 180ms ease,
+    color 180ms ease;
+}
+
+.register-cell.selected {
+  color: #1b1208;
+  background: linear-gradient(135deg, #ffd29a, #f0a85b);
+  box-shadow: 0 0 16px rgba(244, 191, 127, 0.28);
+}
+
+/* ---------- Generic popover (preset, metronome) ---------- */
+
+.popover {
+  position: relative;
+}
+
+.preset-selector,
+.preset-trigger {
+  width: 100%;
+}
+
+.popover-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 38px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 14px;
+  color: var(--text);
+  background: rgba(20, 18, 24, 0.45);
+  backdrop-filter: blur(8px);
+  transition:
+    background 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.popover-trigger:hover,
+.popover-trigger[aria-expanded='true'] {
+  border-color: rgba(244, 191, 127, 0.4);
+  background: rgba(40, 36, 44, 0.6);
+  box-shadow: 0 0 18px rgba(244, 191, 127, 0.14);
+}
+
+.popover-trigger-label {
+  display: none;
+}
+
+.popover-trigger-value {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--gold);
+  font-size: 0.9rem;
+  font-weight: 700;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.popover-caret {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+  transition: transform 180ms ease;
+}
+
+.popover-trigger[aria-expanded='true'] .popover-caret {
+  transform: rotate(180deg);
+}
+
+.popover-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 100%;
+  width: max-content;
+  max-width: min(78vw, 280px);
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  background: rgba(18, 16, 22, 0.94);
+  backdrop-filter: blur(20px);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+  animation: atmosphereMenuIn 180ms ease;
+}
+
+.popover-option {
+  display: flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 12px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.92rem;
+  font-weight: 600;
+  text-align: left;
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.popover-option:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.popover-option.selected {
+  color: var(--gold);
+  background: rgba(244, 191, 127, 0.12);
+}
+
+/* ---------- Deck sliders (intensity, breath) ---------- */
+
+.deck-sliders {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 16px;
+}
+
+.mini-control {
+  min-width: 0;
+}
+
+.mini-control-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.mini-control-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* Thin gold celestial line icons (sun / breath waves) beside the labels. */
+.mini-control-icon {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  color: var(--gold);
+  opacity: 0.85;
+}
+
+.mini-control-header h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.mini-control-header span {
+  color: var(--gold);
+  font-size: 0.8rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Utility bar (volume + tuning) ---------- */
+
+.utility-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  margin-top: 2px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.volume-mini {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  opacity: 0.78;
+}
+
+.volume-icon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  color: var(--muted);
+}
+
+.slider-mini {
+  flex: 1;
+  min-width: 0;
+  height: 18px;
+}
+
+.utility-value {
+  flex-shrink: 0;
+  min-width: 34px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.tuning-stepper {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  padding: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(20, 18, 24, 0.45);
+  backdrop-filter: blur(8px);
+}
+
+.stepper-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--gold);
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 1.15rem;
+  line-height: 1;
+}
+
+.stepper-button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.stepper-button:not(:disabled):hover {
+  background: rgba(244, 191, 127, 0.18);
+}
+
+.stepper-value {
+  min-width: 50px;
+  color: var(--text);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Shared form controls ---------- */
+
+.slider {
+  width: 100%;
+  accent-color: var(--gold);
+}
+
+.field-select {
+  width: 100%;
+  min-height: 52px;
+  padding: 0 18px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  color: var(--text);
+  background: #1c1510;
+  color-scheme: dark;
+  font: inherit;
+  font-weight: 700;
+}
+
+.field-select-compact {
+  min-height: 42px;
+  padding: 0 14px;
+  border-radius: 12px;
+  font-size: 0.88rem;
+}
+
+.field-select option {
+  color: var(--text);
+  background: #1c1510;
+}
+
+.field-select option:checked {
+  color: #160f08;
+  background: var(--gold);
+}
+
+.control-note {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* ---------- Header metronome popover ---------- */
+
+.header-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(20, 18, 24, 0.45);
+  backdrop-filter: blur(8px);
+  transition:
+    background 160ms ease,
+    color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.header-icon-button:hover,
+.header-icon-button[aria-expanded='true'] {
+  color: var(--text);
+  border-color: rgba(244, 191, 127, 0.4);
+  background: rgba(40, 36, 44, 0.6);
+}
+
+.header-icon-button.active {
+  color: #160f08;
+  border-color: rgba(244, 191, 127, 0.85);
+  background: linear-gradient(135deg, #ffe0af, #e99345);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.3),
+    0 0 22px rgba(244, 191, 127, 0.45);
+}
+
+.metronome-trigger {
+  position: relative;
+  overflow: visible;
+}
+
+/* Pulsing dot so the running metronome is obvious even with the popover closed. */
+.metronome-running-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: #fff4e0;
+  border: 1.5px solid #e99345;
+  box-shadow: 0 0 8px rgba(255, 224, 175, 0.9);
+  animation: metronome-running-pulse 1s ease-in-out infinite;
+}
+
+@keyframes metronome-running-pulse {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(0.55);
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .metronome-running-dot {
+    animation: none;
+  }
+}
+
+.metronome-icon {
+  width: 18px;
+  height: 18px;
+}
+
+.metronome-popover {
+  gap: 12px;
+  width: min(78vw, 264px);
+  padding: 14px;
+  border-radius: 20px;
+}
+
+.metronome-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.metronome-field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.metronome-field-value {
+  color: var(--gold);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.metronome-field-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.pill-button {
+  min-height: 48px;
+  border: 0;
+  border-radius: 999px;
+  font-size: 0.95rem;
+  font-weight: 700;
+  transition:
+    background 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease,
+    opacity 160ms ease,
+    transform 160ms ease;
+}
+
+.pill-button.active {
+  color: #160f08;
+  background: linear-gradient(135deg, #ffe0af, #e99345);
+  box-shadow:
+    inset 0 1px rgba(255, 255, 255, 0.22),
+    0 0 24px rgba(244, 191, 127, 0.16);
+}
+
+.pill-button.inactive {
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.1);
+  opacity: 0.8;
+}
+
+/* ---------- Base button ---------- */
+
+button {
+  border: 0;
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible,
+.field-select:focus-visible,
+.slider:focus-visible {
+  outline: 3px solid rgba(244, 191, 127, 0.55);
+  outline-offset: 3px;
+}
+
+@media (hover: hover) {
+  .note-button:hover {
+    transform: translate(-50%, -50%) scale(1.06);
+  }
+
+  .note-button.selected:hover {
+    transform: translate(-50%, -50%) scale(1.1);
+  }
+}
+
+/* ---------- About / Help modal ---------- */
+
+.card {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 32px;
+  background: linear-gradient(145deg, rgba(28, 24, 32, 0.96), rgba(16, 14, 20, 0.96));
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(18px);
+}
+
+.info-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: safe center;
+  padding: 20px;
+  background: rgba(9, 8, 7, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.info-sheet {
+  width: min(100%, 440px);
+  max-height: min(88svh, 720px);
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 22px;
+}
+
+.info-sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.info-tabs {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.info-tab {
+  min-height: 34px;
+  min-width: 72px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 999px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.info-tab.selected {
+  color: #1b1208;
+  background: linear-gradient(135deg, #ffd29a, #f0a85b);
+}
+
+.info-close-button {
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.06);
+  font-size: 1.35rem;
+  line-height: 1;
+}
+
+.info-close-button:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.info-sheet-body {
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.info-sheet-title {
+  margin: 0 0 12px;
+  color: var(--text);
+  font-size: 1.35rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.info-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.info-tagline {
+  margin: 0;
+  color: var(--gold);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.info-body,
+.info-note,
+.info-version {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+  line-height: 1.55;
+}
+
+.info-version {
+  color: var(--text);
+  font-size: 0.82rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  font-variant-numeric: tabular-nums;
+}
+
+.info-section {
+  margin-top: 4px;
+}
+
+.info-section + .info-section {
+  margin-top: 18px;
+}
+
+.info-section-title {
+  margin: 0 0 8px;
+  color: var(--text);
+  font-size: 0.92rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.info-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.info-list li + li {
+  margin-top: 6px;
+}
+
+/* ---------- Small screens ---------- */
+
+@media (max-width: 430px) {
+  .app-shell {
+    padding: 14px;
+  }
+
+  .note-button {
+    width: 48px;
+    height: 48px;
+    min-height: 48px;
+  }
+
+  .note-button .note-primary {
+    font-size: 0.92rem;
+  }
+
+  .register-cell {
+    font-size: 0.7rem;
+  }
+}
+
+@media (max-width: 360px) {
+  .app-shell {
+    padding:
+      max(12px, env(safe-area-inset-top))
+      max(12px, env(safe-area-inset-right))
+      max(12px, env(safe-area-inset-bottom))
+      max(12px, env(safe-area-inset-left));
+  }
+
+  .note-button {
+    width: 44px;
+    height: 44px;
+    min-height: 44px;
+  }
+
+  .note-button .note-primary {
+    font-size: 0.84rem;
+  }
+
+  .note-button .note-secondary {
+    font-size: 0.56rem;
+  }
+
+  .info-overlay {
+    padding: 14px;
+  }
+
+  .info-sheet {
+    padding: 18px;
+    border-radius: 26px;
+  }
+}
+
+/* Short viewports: tighten so the instrument stays above the fold */
+@media (max-height: 740px) {
+  .app-stack {
+    gap: 14px;
+  }
+
+  .instrument {
+    gap: 10px;
+  }
+
+  .moon-stage {
+    width: min(72vw, 288px);
+  }
+
+  .control-deck {
+    gap: 12px;
+  }
+}
