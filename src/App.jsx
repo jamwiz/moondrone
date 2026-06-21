@@ -127,7 +127,7 @@ function App() {
   const [moodId, setMoodId] = useState(readStoredMood)
   const isStartingRef = useRef(false)
 
-  useAppLifecycle(setIsPlaying, setIsMetronomePlaying)
+  useAppLifecycle(setIsPlaying, setIsMetronomePlaying, isPlaying, isMetronomePlaying)
 
   // One moon pulse per actual metronome beat (synced to the audio clock via the
   // engine's visual-only onMetronomeBeat hook). No continuous animation.

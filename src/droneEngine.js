@@ -8708,13 +8708,69 @@ export class DroneEngine {
     return Tone.getContext().rawContext.state
   }
 
-  async resumeContextIfNeeded() {
+  // Lifecycle-only AudioContext wake — does not start playback, rebuild voices, or retune.
+  // Returns diagnostic fields for background-audio experiment logging.
+  async resumeAudioContextForLifecycle() {
     const context = Tone.getContext()
-    const stateBeforeResume = this.getContextState()
+    const rawContext = context.rawContext
+    const stateBefore = rawContext?.state ?? 'unknown'
 
-    if (stateBeforeResume === 'suspended') {
-      await context.resume()
+    if (stateBefore === 'closed') {
+      return {
+        attempted: false,
+        stateBefore,
+        stateAfter: stateBefore,
+        resumed: false,
+        error: null,
+        blocked: true,
+      }
     }
+
+    if (stateBefore === 'running') {
+      return {
+        attempted: false,
+        stateBefore,
+        stateAfter: stateBefore,
+        resumed: false,
+        error: null,
+        blocked: false,
+      }
+    }
+
+    try {
+      if (typeof context.resume === 'function') {
+        await context.resume()
+      } else if (typeof rawContext?.resume === 'function') {
+        await rawContext.resume()
+      }
+
+      const stateAfter = this.getContextState()
+      const blocked = stateAfter !== 'running'
+
+      return {
+        attempted: true,
+        stateBefore,
+        stateAfter,
+        resumed: stateAfter === 'running',
+        error: null,
+        blocked,
+      }
+    } catch (error) {
+      const stateAfter = this.getContextState()
+
+      return {
+        attempted: true,
+        stateBefore,
+        stateAfter,
+        resumed: false,
+        error: error?.message ?? String(error),
+        blocked: true,
+      }
+    }
+  }
+
+  async resumeContextIfNeeded() {
+    await this.resumeAudioContextForLifecycle()
   }
 
   applyPreset(previousPresetName = this.currentPreset.name) {
