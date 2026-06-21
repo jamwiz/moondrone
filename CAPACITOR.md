@@ -149,6 +149,8 @@ capacitor.config.json
 dist/                       # Vite build output (gitignored; generated before sync)
 ```
 
+**Version control:** the project uses local git. Baseline tag **`stable-post-phone-revert`** (`e4e01cb`) — see `README.md` / `TECH_NOTES.md`. Native build folders are committed; Gradle/Pods/build outputs are gitignored.
+
 Generated native assets:
 
 - **Android:** `android/app/src/main/res/mipmap-*` (icons), `drawable*/splash.png` (splash)

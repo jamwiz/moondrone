@@ -117,6 +117,18 @@ Sound engine and premium UI layout are **complete** — do not change presets, r
 - [x] Resource/crackling fix — limbo registration, complete `disposeCrossfadeDeck()`, tracked timeouts, fast-retire on supersede
 - [x] Dev diagnostics — `setFullChainCrossfadeDebug`, `setNoteChangeDebug`, mode persisted in `localStorage`
 - [x] AIR/reverb cleanup pass **reverted** (made artifacts worse); small AIR/hiss on some Moon switches accepted as known minor artifact
+- [x] Phone-resonance tuning pass **fully reverted** (no phone bus EQ / exciter remnants in `src/`)
+
+## Completed — Production Glitch Fixes (2026)
+
+- [x] **Startup note intent** — first key/register change during async Play is queued (`pendingStartupNote`) and flushed before voice scheduling; `App.jsx` forwards note taps during startup
+- [x] **Full-chain Io settle alignment** — `captureFullChainTransitionSnapshot()` + silent settle with preserved Breath/Mood phase, effective tonal voice targets, mood/air/bus EQ; `fullChainCrossfadeVoiceHoldUntil` during crossfade (fixes Mimas/Europa → Io hot entry then settle)
+
+## Completed — Version Control
+
+- [x] Local git repository initialized
+- [x] `.gitignore` for Vite + React + Capacitor (excludes `node_modules/`, `dist/`, build caches, env files, `.cursor/`)
+- [x] Baseline commit **`e4e01cb`** with tag **`stable-post-phone-revert`**
 
 ## App-Store Readiness (Active)
 
@@ -141,8 +153,9 @@ Sound engine and premium UI layout are **complete** — do not change presets, r
 - [ ] Verify Wood punchier and Triangle open still rings naturally after metronome bump
 - [ ] Verify reference tuning across keys, registers, presets, and Binaural beat modes
 - [ ] Verify **4 s** Play fade-in from stopped feels gentle and complete (no breath-loop interruption during startup guard)
+- [ ] Verify **Play → immediate note change** honors the first key tap (production build)
 - [ ] Verify Breath stays continuous after note/register/Moon changes (no restart, stuck bright/dull jump, or end-of-crossfade swell)
-- [ ] Verify **full-chain Moon crossfade** — smooth overlap, no gap, no crackling on rapid Moon changes, old decks disposed
+- [ ] Verify **full-chain Moon crossfade** — smooth overlap, no gap, no crackling on rapid Moon changes, old decks disposed; **Mimas/Europa → Io** at Intensity ~70 / Breath ~35 should not enter hot then settle
 - [ ] Moon AIR/hiss — minor artifact on some switches (→ Mimas / → Io); confirm it has not regressed vs. current baseline
 
 ## Regression Watch (only if audio or lifecycle code changes)

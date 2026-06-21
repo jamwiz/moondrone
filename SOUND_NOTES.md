@@ -398,7 +398,8 @@ Stable and shippable for app wrapping:
 | Metronome (Wood / Triangle) | Complete |
 | Output routing / mix architecture | Stable |
 | Note/register crossfades | Phased lifecycle — guard first, incoming fade to live Breath voicing, continuous Breath phase; note-change swell fixed |
-| Moon changes while playing | **Shipped — `fullChainCrossfade` default.** Dual complete chains, equal-power output crossfade (1.5 s), gap fix, resource cleanup. Masked fallback stable. Legacy morph bypassed. Small AIR/hiss on some switches (→ Mimas / → Io) — accepted |
+| Moon changes while playing | **Shipped — `fullChainCrossfade` default.** Dual complete chains, equal-power output crossfade (1.5 s), gap fix, resource cleanup, transition snapshot silent settle (Mimas/Europa → Io alignment). Masked fallback stable. Legacy morph bypassed. Small AIR/hiss on some switches (→ Mimas / → Io) — accepted |
+| Startup note change | **Shipped** — `pendingStartupNote` queue during async Play; first immediate key tap honored in production |
 | Reverb slider | Verified — smooth wetness ramping |
 | Triangle open sustain | Verified — 12-player pool |
 | Limiter / combined playback | Fixed — post-EQ metronome clip + click attack soften to reduce master limiter pumping |
@@ -480,20 +481,25 @@ All Moon switches while the drone is playing use **`MOON_TRANSITION.mode: 'fullC
 
 | Step | Behavior |
 |------|----------|
+| Snapshot | **`captureFullChainTransitionSnapshot()`** — Breath phase, effective tonal, Mood phase, key/register, Intensity, volume, reference A (before outgoing deck freezes) |
 | Capture | Entire current chain frozen as **old deck** (voices, filter, EQ, reverb, AIR, orbit, dual beats, `moonTransitionGain`); bloom bus snapped silent; registered as **limbo deck** immediately |
 | Rebuild | Brand-new complete chain for the new Moon; new deck gain snapped to 0 |
-| Settle | New Moon voicing applied while silent (`settleNewMoonDeckWhileSilent`) — same settled sound as a fresh Play |
+| Settle | **`settleNewMoonDeckWhileSilent(..., transitionSnapshot)`** — same settled sound as the outgoing deck at capture: preserved Breath/Mood phase (no reanchor when snapshot exists), voice gains at effective tonal (incl. Cosmos 8–10), filter/choir/mood bloom-eclipse/AIR/output trim |
 | Ready wait | Old deck stays at **unity** until new reverb `.ready` (max 3 s safety timeout) |
-| Crossfade | **Equal-power** ramp old 1→0 and new 0→1 from **one shared `startAt`** over **1.5 s** |
+| Crossfade | **Equal-power** ramp old 1→0 and new 0→1 from **one shared `startAt`** over **1.5 s**; **`fullChainCrossfadeVoiceHoldUntil`** blocks breath voice re-ramp until crossfade completes |
 | Dispose | Old deck disposed after crossfade + **0.25 s** guard; complete teardown (Strings ensemble, Choir nodes, meter taps, tracked timeouts) |
 
 Tuning: `MOON_TRANSITION.fullChainCrossfade` in `src/soundTuning.js` (`totalSeconds`, `curve`, `disposeGuardSeconds`, `reverbReadyMaxWaitSeconds`, `fastRetireSeconds`).
 
 **Masked fallback** (`moondroneDebug.setMoonTransitionMode('masked')`): fade `moonTransitionGain` down → silent rebuild → fade up (~0.28 s / ~0.55 s). Reverb bloom/tail path is **disabled** (`transitionTail.enabled: false`). Proven stable; use when comparing or if full-chain ever regresses.
 
-**Not used in production:** bridge tone, reverb bloom/tail during Moon change, per-layer moon morph swell, or pre-dispose AIR/reverb wet ramps (tried and reverted — made artifacts worse).
+**Not used in production:** bridge tone, reverb bloom/tail during Moon change, per-layer moon morph swell, pre-dispose AIR/reverb wet ramps (tried and reverted — made artifacts worse), or **phone-resonance bus EQ / exciter** (tried and fully reverted).
 
-Dev probes: `moondroneDebug.setFullChainCrossfadeDebug(true)`, `setNoteChangeDebug(true)`, `setMoonTransitionMode(...)`. Full detail in `TECH_NOTES.md`.
+Dev probes: `moondroneDebug.setFullChainCrossfadeDebug(true)` (includes settle-silent / crossfade-start / crossfade-end target probes for Io extensions), `setNoteChangeDebug(true)`, `setMoonTransitionMode(...)`. Full detail in `TECH_NOTES.md`.
+
+### Startup note change
+
+While `start()` is still async (context unlock, `reverb.ready`), key/register taps queue **`pendingStartupNote`** (last wins). The engine flushes before frequency setup and voice scheduling; **`App.jsx`** forwards note taps during startup instead of dropping them. Fixes production builds where the first immediate note change after Play was ignored.
 
 ### Note / register crossfade (while playing)
 

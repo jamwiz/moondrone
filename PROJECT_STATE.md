@@ -98,8 +98,8 @@ The web sound engine is in a **stable, shippable state**:
 - **Moons / preset engines** — Mimas/Pure, Europa/Shruti, Titan/Strings, Io/Cosmos, and Binaural are implemented and tuned (Choir engine code remains but is not user-selectable). Per-moon balance tables in `soundTuning.js`: output/register trims, air/shimmer scale, Phase harmonic scale, per-register voice scales, and preset-specific Breath gain follow (Mimas + Titan)
 - **Metronome** — sample-based Wood and Triangle with independent transport
 - **Output routing** — single master limiter; no drone compressor or per-bus limiters
-- **Transitions** — note/register phased crossfades preserve Breath phase (note-change swell fixed: guard armed, fresh breath snapshot, register trim at crossfade start). **Moon changes while playing** use **`fullChainCrossfade`** by default: dual complete independent chains, equal-power output crossfade (**1.5 s**), old deck held at unity until new reverb `.ready`, shared ramp start, limbo registration + complete old-deck disposal (crackling/resource leak fixed). Stable **`masked`** fallback (fade-down → silent rebuild → fade-up; reverb bloom/tail disabled). Legacy per-layer moon morph code retained but bypassed in both active modes. Small AIR/hiss clip on some Moon switches (especially → Mimas / → Io) is a known, accepted artifact — an AIR cleanup pass was tried and reverted because it made transitions worse
-- **Startup** — 4 s Play fade-in from stopped; True Orbit + Super dual beats fade in over the same window; breath/mood-auxiliary loops guarded during startup (`startupFadeEndsAt`)
+- **Transitions** — note/register phased crossfades preserve Breath phase (note-change swell fixed: guard armed, fresh breath snapshot, register trim at crossfade start). **Moon changes while playing** use **`fullChainCrossfade`** by default: dual complete independent chains, equal-power output crossfade (**1.5 s**), old deck held at unity until new reverb `.ready`, shared ramp start, limbo registration + complete old-deck disposal (crackling/resource leak fixed). **Silent settle** captures a live transition snapshot (Breath phase, effective tonal, Mood phase) and applies full settled targets before crossfade — fixes Mimas/Europa → Io hot entry; **`fullChainCrossfadeVoiceHoldUntil`** holds breath voice ramps during crossfade. Stable **`masked`** fallback (fade-down → silent rebuild → fade-up; reverb bloom/tail disabled). Legacy per-layer moon morph code retained but bypassed in both active modes. Small AIR/hiss clip on some Moon switches (especially → Mimas / → Io) is a known, accepted artifact — AIR/reverb cleanup and **phone-resonance** passes were tried and fully reverted
+- **Startup** — 4 s Play fade-in from stopped; True Orbit + Super dual beats fade in over the same window; breath/mood-auxiliary loops guarded during startup (`startupFadeEndsAt`). **Startup note intent:** `pendingStartupNote` queues key/register during async `start()`; last request wins and flushes before voice scheduling — first immediate note change after Play is honored in production builds
 - **Tone Lab** — `src/toneLab.js` macros for master EQ, harmonics, breath air, moon-phase harmonics, and dynamics (no UI editor); shared bus path for all Moons including Binaural
 - **Reverb** — fixed subtle background level (`FIXED_REVERB_PERCENT` 20% → ~0.09 wet), set on start and not changed by preset selection; `await reverb.ready` before first audible output (prevents click/pop on startup)
 - **Mix architecture** — drone and metronome buses, headroom offset, presence/click EQ on metronome
@@ -115,7 +115,8 @@ The web sound engine is in a **stable, shippable state**:
 Re-check these only during wrapper testing or if audio code changes:
 
 - Note-change crossfade / pitch glide — no glide; no swell at crossfade end; rapid key taps fixed (per-set dispose timers)
-- Moon full-chain crossfade — no gap (old audible until new ready), no midpoint swell, no crackling on rapid Moon changes, old decks disposed cleanly
+- **Startup note change** — Play then immediate key tap honors the first switch (`pendingStartupNote` / `queueStartupNoteIntent` in engine; `App.jsx` forwards note taps during `isStarting`)
+- Moon full-chain crossfade — no gap (old audible until new ready), no midpoint swell, no crackling on rapid Moon changes, old decks disposed cleanly; **Mimas/Europa → Io** should not enter hot then settle (transition snapshot + silent settle alignment)
 - Moon AIR/hiss artifact — small clip especially → Mimas (Pure) and → Io (Cosmos); do not re-apply the reverted AIR/reverb cleanup pass without a lighter approach
 - Masked Moon fallback — still stable if switched via `moondroneDebug.setMoonTransitionMode('masked')`
 - Preset transition smoothing (Binaural ↔ Europa undertone path; layer transitions when stopped)
@@ -129,6 +130,7 @@ Re-check these only during wrapper testing or if audio code changes:
 - React + Vite + Tone.js
 - npm package name: `moondrone`
 - Mobile-first single-screen web UI with a moon-centered instrument
+- **Git** — local repository at project root; baseline tag **`stable-post-phone-revert`** (`e4e01cb`) captures post–phone-resonance-revert state plus startup-note and full-chain Io settle fixes. Restore with `git checkout stable-post-phone-revert` or `git reset --hard stable-post-phone-revert`
 
 ## Source Files
 
@@ -220,4 +222,4 @@ Regenerate native icon/splash: `npm run cap:assets` then `npm run cap:sync`.
 
 ## Before Making Changes
 
-Read `VISION.md` first. Treat `TECH_NOTES.md` and `SOUND_NOTES.md` as references for engine behavior. Use `TODO.md` for the active task list.
+Read `VISION.md` first. Treat `TECH_NOTES.md` and `SOUND_NOTES.md` as references for engine behavior. Use `TODO.md` for the active task list. Compare audio regressions against git tag **`stable-post-phone-revert`** when tuning the engine.

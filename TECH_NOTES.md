@@ -15,6 +15,26 @@ Moondrone is built with Vite and React.
 - Tone.js handles browser audio synthesis, effects, and sample playback.
 - npm package name: `moondrone`
 
+### Version control
+
+Local **git** repository (initialized 2026). Baseline commit and tag:
+
+| Item | Value |
+|------|--------|
+| Tag | `stable-post-phone-revert` |
+| Commit | `e4e01cb` |
+| Message | Stable Moondrone baseline after phone resonance revert |
+
+Restore that snapshot:
+
+```bash
+git checkout stable-post-phone-revert
+# or
+git reset --hard stable-post-phone-revert
+```
+
+`.gitignore` excludes `node_modules/`, `dist/`, `.vite/`, env files, editor folders (`.cursor/`, `.idea/`, `.vscode/*` except extensions.json), and Capacitor/Android/iOS build artifacts. Set `user.name` / `user.email` before your first local commit if Git for Windows has no global identity yet.
+
 ## Main Files
 
 - `src/App.jsx` — user interface for drone and metronome controls (moon-centered layout, Circle of Fifths key ring, atmosphere state)
@@ -301,7 +321,7 @@ Mood movement tuning lives in `src/moods.js` (`MOOD_TUNING`, `MOOD_TRUE_ORBIT`, 
 | `stereo.width` | Global stereo width multiplier |
 | `dynamics` | `outputTrimDb`, `limiterCeilingDb`, `compressorAmount` (all Moons) |
 
-**Regression check:** after edits, compare Shruti Medium @ Intensity 70 / Volume 100% on phone speakers against a git snapshot; verify Play/Stop and drone+metronome for clicks/pumping; verify Binaural ↔ Europa Moon switches while playing (High/Very High).
+**Regression check:** after edits, compare Shruti Medium @ Intensity 70 / Volume 100% on phone speakers against git tag **`stable-post-phone-revert`**; verify Play/Stop and drone+metronome for clicks/pumping; verify Binaural ↔ Europa Moon switches while playing (High/Very High); verify Play → immediate note change and Mimas/Europa → Io full-chain crossfade at Intensity ~70 / Breath ~35.
 
 **Dev diagnostics (dev builds only — `window.moondroneDebug` in `src/main.jsx`):**
 
@@ -326,7 +346,7 @@ moondroneDebug.setStringsIsolationMode({ enabled: true, mode: 'principles-only' 
 moondroneDebug.setMoonTransitionIsolation({ enabled: true, voicesOnly: true }) // morph-path only
 ```
 
-Flags live in `src/soundTuning.js` / engine state. Removed or reverted experimental paths: bridge tone, reverb bloom/tail on Moon change, energy normalization, post-morph voice swell, per-layer stagger tables, and the **AIR/reverb cleanup pass** (pre-dispose wet ramps, incoming AIR de-click, `fullChainCrossfade.airCleanup` — made artifacts worse; do not re-apply as-is).
+Flags live in `src/soundTuning.js` / engine state. Removed or reverted experimental paths: bridge tone, reverb bloom/tail on Moon change, energy normalization, post-morph voice swell, per-layer stagger tables, the **AIR/reverb cleanup pass** (pre-dispose wet ramps, incoming AIR de-click, `fullChainCrossfade.airCleanup` — made artifacts worse; do not re-apply as-is), and the **phone-resonance pass** (parallel exciter / phone bus EQ — fully reverted; not in current `src/`).
 
 ## Reference Tuning
 
@@ -353,6 +373,7 @@ frequency = referenceA * 2 ** ((midiNote - 69) / 12)
 Verified in the web app. Regression-watch in the app wrapper.
 
 - Tapping a key while stopped starts the drone at that key with the normal fade-in.
+- **Startup note intent:** while `start()` is async (`isStarting && !isPlaying`), `setKey()` / `setOctave()` queue `pendingStartupNote` (last wins); `applyPendingStartupNoteIntent()` flushes before frequency setup and voice scheduling. `App.jsx` forwards note taps during startup instead of returning early — fixes production builds ignoring the first immediate note change after Play.
 - Key and register changes while playing use a crossfade with no pitch glide and preserve Breath phase (see **Note/Register Crossfade Lifecycle** below).
 - **Play from stopped:** voice gains cancel to **0 at `startTime`**, then ramp to target over `START_FADE_SECONDS` (4 s); True Orbit + Super dual beats snap silent, start oscillators, then fade in over the same 4 s window; `startupFadeEndsAt` set before `isPlaying = true`
 - **Stop:** `cancelAndHoldAtTime` before reading gain for stop fade (avoids jump when interrupting startup ramp); orbit/dual beats fade out with `neutralizeOrbitPair` / `neutralizeDualBeats`; `noteCrossfadeEndsAt` cleared
@@ -393,7 +414,7 @@ Intensity and Breath share one tonal model but use separate update paths so Brea
 - **Register/Moon (stopped):** `reanchorBreathAfterContextChange()` can reset to a clean base state.
 - **Note/register while playing:** phased crossfade lifecycle (below) — Breath phase is preserved; incoming voices target live Breath voicing.
 - **Moon/preset while playing:** layer transitions own voice gains; shared tonal state ramps; Breath phase is preserved; Mood re-sync runs after voice transition/rebuild.
-- **Guard windows:** `canRampVoiceGainsFromBreathOrIntensity()` returns false during startup fade, note crossfade guard (`noteCrossfadeEndsAt`), and preset transition — breath/intensity voice ramps are skipped so scheduled fades are not interrupted.
+- **Guard windows:** `canRampVoiceGainsFromBreathOrIntensity()` returns false during startup fade, note crossfade guard (`noteCrossfadeEndsAt`), preset transition, and **`fullChainCrossfadeVoiceHoldUntil`** (breath voice ramps held until full-chain crossfade completes) — breath/intensity voice ramps are skipped so scheduled fades are not interrupted.
 
 ## Note/Register Crossfade Lifecycle
 
@@ -460,13 +481,14 @@ new deck:  … → new moonTransitionGain (0 → 1) ─┘
 **Lifecycle (`performFullChainMoonCrossfade` → `startFullChainCrossfade`):**
 
 1. **`abandonInFlightFullChainTransition()`** — fast-retire any pending old decks from a prior interrupted transition
-2. **Capture** — `captureCurrentDroneDeck()`; bloom bus snapped silent; outputs disconnected from live meter tap where needed
-3. **Limbo register** — old deck pushed to `fullChainCrossfadeDecks` immediately (prevents rapid Moon changes from stranding chains)
-4. **Rebuild** — null guarded builders; `ensureSignalChain()` builds fresh `this.*` for new Moon; new `moonTransitionGain` snapped to 0
-5. **Settle** — `settleNewMoonDeckWhileSilent()` applies settled voicing (same end state as fresh Play on that Moon); breath loop starts here if Breath > 0
-6. **Ready wait** — old deck stays at **unity** until `newReverb.ready` (max `reverbReadyMaxWaitSeconds`, default 3 s)
-7. **Crossfade** — single shared `startAt`; `rampFullChainCrossfade()` equal-power old 1→0, new 0→1 over `totalSeconds` (default **1.5 s**)
-8. **Dispose** — after crossfade + `disposeGuardSeconds` (default **0.25 s**), `disposeCrossfadeDeck()` tears down old deck completely (Strings ensemble, Choir nodes, convolvers, timeouts)
+2. **`captureFullChainTransitionSnapshot()`** — live Breath phase, effective tonal, Mood phase, key/register, Intensity, Master Volume, reference A (before freezing outgoing modulation)
+3. **Capture** — `captureCurrentDroneDeck()`; bloom bus snapped silent; outputs disconnected from live meter tap where needed
+4. **Limbo register** — old deck pushed to `fullChainCrossfadeDecks` immediately (prevents rapid Moon changes from stranding chains)
+5. **Rebuild** — null guarded builders; `ensureSignalChain()` builds fresh `this.*` for new Moon; new `moonTransitionGain` snapped to 0
+6. **Settle** — `settleNewMoonDeckWhileSilent(silentTime, snapRamp, transitionSnapshot)` applies the **same settled targets the outgoing deck had at capture**: preserved Breath/Mood phase (no reanchor when snapshot exists), voice gains at `getVoiceTargetGain(index, effectiveTonalAmount)`, filter/choir at effective tonal, mood bloom/eclipse, AIR/shimmer, Tone Lab/output trim, Cosmos extensions 8–10
+7. **Ready wait** — old deck stays at **unity** until `newReverb.ready` (max `reverbReadyMaxWaitSeconds`, default 3 s)
+8. **Crossfade** — single shared `startAt`; `fullChainCrossfadeVoiceHoldUntil = startAt + totalSeconds + 0.05`; `rampFullChainCrossfade()` equal-power old 1→0, new 0→1 over `totalSeconds` (default **1.5 s**)
+9. **Dispose** — after crossfade + `disposeGuardSeconds` (default **0.25 s**), `disposeCrossfadeDeck()` tears down old deck completely (Strings ensemble, Choir nodes, convolvers, timeouts). Breath loop resumes without a corrective voice re-ramp spike after hold clears
 
 **Rapid Moon changes:** `forceRetireAllCrossfadeDecks()` / `fastRetireCrossfadeDeck()` — quick fade gain to 0, then dispose (default **0.08 s** fast retire).
 
@@ -489,14 +511,17 @@ new deck:  … → new moonTransitionGain (0 → 1) ─┘
 
 | Function | Role |
 |----------|------|
-| `performFullChainMoonCrossfade()` | Orchestrates capture → rebuild → settle → ready wait → crossfade |
+| `performFullChainMoonCrossfade()` | Orchestrates snapshot → capture → rebuild → settle → ready wait → crossfade |
+| `captureFullChainTransitionSnapshot()` | Live modulation state from outgoing deck before freeze |
 | `captureCurrentDroneDeck()` | Snapshot current chain into old deck object |
 | `prepareCapturedCrossfadeDeck()` | Pin old fade gain at 1; snap bloom silent |
 | `registerLimboCrossfadeDeck()` | Track old deck before crossfade starts |
-| `settleNewMoonDeckWhileSilent()` | Apply settled new-Moon state at gain 0 |
-| `startFullChainCrossfade()` | Shared-start equal-power ramp + scheduled dispose |
+| `settleNewMoonDeckWhileSilent()` | Apply settled new-Moon state at gain 0 from optional transition snapshot |
+| `logFullChainSettleDiagnostics()` | Dev settle/crossfade target probes (extension gains 8–10, air/mood/output) when debug on |
+| `startFullChainCrossfade()` | Shared-start equal-power ramp + voice-hold guard + scheduled dispose |
 | `disposeCrossfadeDeck()` | Full teardown of old graph |
 | `abandonInFlightFullChainTransition()` | Cancel superseded transition; fast-retire old decks |
+| `queueStartupNoteIntent()` / `applyPendingStartupNoteIntent()` | Queue key/register during async `start()`; flush before scheduling |
 | `logFullChainProbe()` / `logFullChainResourceDiagnostics()` | Dev lifecycle logging |
 
 ### Masked simple Moon transition (fallback)
@@ -556,8 +581,8 @@ When `deferExtensionsOnCosmosEnter: true`, main crossfade sets `entryTarget = 0`
 `completePresetVoiceCrossfade()` is a **pure handoff** — no audible re-ramp:
 
 1. Clears transition flags and snapshots
-2. `startBreathLoop()` + `syncBreathModulation()` if Breath active
-3. `startMoodLoop()` — reads values already at morph endpoints
+2. `startBreathLoop()` if Breath active — **does not** call `syncBreathModulation()` here (avoids Io drop / Titan swell after guard clears)
+3. `startMoodLoop({ skipInitialSync: true })` when mood phase was carried over — reads values already at morph endpoints
 
 No `beginMoonVoiceCrossfadePostMorph()`, no `beginNoteCrossfadeBreathReanchor()` on this path.
 

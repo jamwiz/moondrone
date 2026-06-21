@@ -74,7 +74,8 @@ Metronome samples live in `public/` (`block.high.mp3`, `block.low.mp3`, `triangl
 
 - Play from stopped fades in over **4 seconds**; manual Stop fades out over **3 seconds** (lifecycle/background stop is immediate)
 - **Note and register** changes while playing use phased voice crossfades (no pitch glide). Breath phase is preserved; incoming voices fade to the live Breath voicing.
-- **Moon** changes while playing use **full-chain crossfade** by default: the entire current drone chain is captured as a frozen old deck, a brand-new complete chain is built for the new Moon, and the two decks are equal-power crossfaded at their output gains (**1.5 s**). The old deck stays fully audible until the new reverb IR is ready, then both ramps share one start time. A stable **masked** fallback (fade-down → silent rebuild → fade-up) remains available for debugging.
+- **Startup note change:** tapping a different key while Play is still starting (async IR/context setup) is queued and applied before voices schedule — the first immediate note switch after Play is reliable in production builds.
+- **Moon** changes while playing use **full-chain crossfade** by default: the entire current drone chain is captured as a frozen old deck, a brand-new complete chain is built for the new Moon, and the two decks are equal-power crossfaded at their output gains (**1.5 s**). The old deck stays fully audible until the new reverb IR is ready, then both ramps share one start time. Silent settle uses a **transition snapshot** (Breath/Mood phase, effective tonal, trims/EQ) so incoming Moons — especially **Mimas/Europa → Io** — do not enter hot and then settle. A stable **masked** fallback (fade-down → silent rebuild → fade-up) remains available for debugging.
 - Settled Moon sound, master output, limiter/compressor, metronome, and note/register behavior are unchanged — only the transition path differs.
 - Projection is always enabled internally for phone-speaker clarity and perceived loudness; there is no Projection UI toggle, and no master-gain or limiter change.
 - First Play waits for reverb impulse response to load (prevents startup click/pop)
@@ -100,6 +101,15 @@ moondroneDebug.setNoteChangeDebug(true)                    // note/register cros
 - `ROADMAP.md` — milestone planning
 - `TODO.md` — app wrapping and device validation tasks
 - `CAPACITOR.md` — Capacitor setup and native build workflow
+
+## Version control
+
+Local git repository. Baseline tag **`stable-post-phone-revert`** (`e4e01cb`) — post–phone-resonance-revert state with startup-note and full-chain Io settle fixes.
+
+```bash
+git checkout stable-post-phone-revert   # inspect baseline
+git reset --hard stable-post-phone-revert   # restore working tree to baseline
+```
 
 ## Development (Web)
 
