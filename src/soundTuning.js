@@ -50,7 +50,7 @@ export const PRESET_VOICE_GAINS = {
   Strings: [0.19, 0.36, 0.10, 0.015, 0.015, 0.01],
   Choir: [0.045, 0.41, 0.30, 0.25, 0.17, 0.07],
   Cosmos: [0.045, 0.30, 0.18, 0.20, 0.23, 0.11],
-  Binaural: [0.062, 0.44, 0.19, 0.10, 0.055, 0.025],
+  Binaural: [0.055, 0.38, 0.17, 0.10, 0.055, 0.025],
 }
 
 // Per-preset oscillator waveform overrides (Tone.js types). Only listed indices
@@ -93,7 +93,7 @@ export const PRESETS = [
   {
     name: 'Binaural',
     voiceGains: PRESET_VOICE_GAINS.Binaural,
-    filter: { frequency: 333, Q: 0.33 },
+    filter: { frequency: 385, Q: 0.33 },
     reverb: { decay: 5.2, preDelay: 0.08, wet: 0.28 },
   },
 ]
@@ -152,16 +152,16 @@ export const PRESET_LOW_MID_REGISTER_VOICING = {
     2: { 0: 0.86, 1: 0.86, 2: 0.92 },
     3: { 0: 0.88, 1: 0.88, 2: 0.93, 6: 0.8 },
   },
-  // Binaural: deeper Low/Medium hollow — root/fifth/+12 eased; High/VH use register
-  // gain/presence tables below for principal-root clarity (beat undertones unchanged).
+  // Binaural: deeper Low/Medium hollow — ease low octave, root, fifth, and undertone
+  // pressure; High/VH root-forward tables below preserve beat clarity on headphones.
   Binaural: {
-    2: { 0: 0.66, 1: 0.70, 2: 0.68, 3: 0.78 },
-    3: { 0: 0.68, 1: 0.38, 2: 0.70, 3: 0.80 },
+    2: { 0: 0.58, 1: 0.64, 2: 0.62, 3: 0.76 },
+    3: { 0: 0.62, 1: 0.34, 2: 0.64, 3: 0.78 },
   },
 }
 
 // Binaural headphone undertones (not register foundations).
-export const BINAURAL_UNDERTONE_GAIN = 0.07
+export const BINAURAL_UNDERTONE_GAIN = 0.064
 export const BINAURAL_PAN_AMOUNT = 0.52
 
 // Shruti register voicing trims at High / Very High (multiplicative, 1 = unchanged).
@@ -352,8 +352,8 @@ export const PRESET_BALANCE_TRIM_DB = {
   Strings: 1.4,
   Choir: -1.25,
   Cosmos: -1.6,
-  // Gentle static level match / beat headroom — not a live master-stage jump (see droneEngine).
-  Binaural: -1.5,
+  // Gentle static level match / beat headroom — Low/Med voicing trims do most of the work.
+  Binaural: -1.35,
 }
 
 // High / Very High were at −5 / −4 dB — so aggressive that those registers were
@@ -382,8 +382,8 @@ export const PRESET_REGISTER_BALANCE_TRIM_DB = {
   // Binaural: ease Low/Medium output dominance; lift High/VH principal audibility
   // (register-relative rebalance — not a global preset trim).
   Binaural: {
-    [REGISTER_OCTAVES.LOW]: -0.55,
-    [REGISTER_OCTAVES.MEDIUM]: -0.42,
+    [REGISTER_OCTAVES.LOW]: -0.65,
+    [REGISTER_OCTAVES.MEDIUM]: -0.52,
     [REGISTER_OCTAVES.HIGH]: 0.8,
     [REGISTER_OCTAVES.VERY_HIGH]: 0.95,
   },
@@ -415,6 +415,14 @@ export const PRESET_AIR_SHIMMER_GAIN_SCALE = {
     register: {
       [REGISTER_OCTAVES.HIGH]: 0.82,
       [REGISTER_OCTAVES.VERY_HIGH]: 0.76,
+    },
+  },
+  // Binaural: gentle air-shelf openness — no breath-noise bed, no Cosmos partials.
+  Binaural: {
+    default: 1.04,
+    register: {
+      [REGISTER_OCTAVES.LOW]: 0.98,
+      [REGISTER_OCTAVES.MEDIUM]: 1.0,
     },
   },
 }
@@ -504,10 +512,10 @@ export const PRESET_REGISTER_VOICE_GAIN_SCALE = {
     [REGISTER_OCTAVES.HIGH]: { 0: 0.84, 1: 0.74, 2: 0.82 },
     [REGISTER_OCTAVES.VERY_HIGH]: { 0: 0.62, 1: 0.44, 2: 0.56, 3: 0.944, 4: 0.91, 5: 0.91 },
   },
-  // Binaural: Low/Med hollow + High/VH root-forward (undertone beat gain unchanged).
+  // Binaural: Low/Med hollow + undertone trim; High/VH root-forward for beat clarity.
   Binaural: {
-    [REGISTER_OCTAVES.LOW]: { 0: 0.66, 1: 0.74, 2: 0.74, 3: 0.80, 6: 0.88, 7: 0.88 },
-    [REGISTER_OCTAVES.MEDIUM]: { 0: 0.80, 1: 0.42, 2: 0.76, 3: 0.82, 6: 0.90, 7: 0.90 },
+    [REGISTER_OCTAVES.LOW]: { 0: 0.58, 1: 0.66, 2: 0.66, 3: 0.78, 6: 0.78, 7: 0.78 },
+    [REGISTER_OCTAVES.MEDIUM]: { 0: 0.72, 1: 0.36, 2: 0.68, 3: 0.80, 6: 0.80, 7: 0.80 },
     [REGISTER_OCTAVES.HIGH]: { 0: 0.86, 1: 1.16, 2: 0.80, 3: 0.82, 4: 0.78, 5: 0.74, 6: 0.96, 7: 0.96 },
     [REGISTER_OCTAVES.VERY_HIGH]: {
       0: 0.82,
@@ -715,24 +723,35 @@ export const PRESET_PROJECTION_TUNING = {
     dryWidth: 0.46,
     lowMidCutGainDb: -4.4,
   },
+  // Binaural: decongest low-mid push; slight presence lift for openness (L/R beat exempt from dry narrow).
+  Binaural: {
+    presenceGainScale: 1.06,
+    lowMidCutGainDb: -4.6,
+  },
 }
 
 // Apply a fraction of bus EQ at Low/Medium (body scoop before High/VH full blend).
 export const PRESET_BUS_EQ_ALWAYS_ON_BLEND = {
   Pure: 0.58,
   Shruti: 0.48,
-  Binaural: 0.50,
+  Binaural: 0.72,
 }
 
 // Per-preset, per-register bus/body EQ overrides (Medium Low/Medium spectral relief).
 // When listed, replaces that register's low-mid/body-mid profile and blend floor.
 export const PRESET_REGISTER_BUS_EQ = {
   Binaural: {
+    [REGISTER_OCTAVES.LOW]: {
+      lowMid: { frequency: 280, Q: 0.42, maxGainDb: -2.9 },
+      bodyMid: { frequency: 680, Q: 0.44, maxGainDb: -1.5 },
+      alwaysOnBlend: 0.88,
+      minBlend: 0.84,
+    },
     [REGISTER_OCTAVES.MEDIUM]: {
-      lowMid: { frequency: 360, Q: 0.40, maxGainDb: -3.5 },
-      bodyMid: { frequency: 700, Q: 0.44, maxGainDb: -1.9 },
-      alwaysOnBlend: 0.92,
-      minBlend: 0.88,
+      lowMid: { frequency: 340, Q: 0.40, maxGainDb: -3.8 },
+      bodyMid: { frequency: 720, Q: 0.44, maxGainDb: -2.2 },
+      alwaysOnBlend: 0.94,
+      minBlend: 0.90,
     },
   },
 }
@@ -1007,8 +1026,8 @@ export const COSMOS_BUS_EQ = {
 }
 
 export const BINAURAL_BUS_EQ = {
-  lowMidFrequency: 370, lowMidQ: 0.48, lowMidMaxGainDb: -2.5,
-  upperMidFrequency: 880, upperMidQ: 0.6, upperMidMaxGainDb: -1.1,
+  lowMidFrequency: 320, lowMidQ: 0.46, lowMidMaxGainDb: -3.1,
+  upperMidFrequency: 820, upperMidQ: 0.58, upperMidMaxGainDb: -1.35,
 }
 
 // Mimas-only: gentle 1–3 kHz presence scoop at High/VH (pitch clarity preserved
@@ -1022,7 +1041,7 @@ export const PURE_BUS_EQ = {
 export const PRESET_BODY_MID_EQ = {
   Pure: { frequency: 820, Q: 0.52, maxGainDb: -1.35 },
   Shruti: { frequency: 620, Q: 0.5, maxGainDb: -1.15 },
-  Binaural: { frequency: 580, Q: 0.5, maxGainDb: -1.1 },
+  Binaural: { frequency: 720, Q: 0.48, maxGainDb: -1.45 },
 }
 
 export const PRESET_BUS_EQ_PROFILES = {
@@ -1083,7 +1102,7 @@ export const AIR_SHIMMER_TUNING = {
   presetLowMidScoop: {
     Pure: { frequency: 520, Q: 0.46, gainDb: -1.55 },
     Shruti: { frequency: 420, Q: 0.44, gainDb: -1.25 },
-    Binaural: { frequency: 440, Q: 0.44, gainDb: -1.15 },
+    Binaural: { frequency: 360, Q: 0.44, gainDb: -1.45 },
   },
 
   // (2) Gentle air shelf — opens the spectrum above ~4 kHz without a harsh treble spike.
@@ -1101,6 +1120,7 @@ export const AIR_SHIMMER_TUNING = {
     Strings: 1.04,
     Choir: 1.03,
     Cosmos: 1,
+    Binaural: 1.04,
   },
 
   // (4) Custom harmonic partials on selected layers (replaces pure sine). Values are
