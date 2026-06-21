@@ -443,7 +443,20 @@ export class DroneEngine {
     breath = this.breath,
     reverbWetPercent = this.currentReverbWet * 100,
   ) {
-    if (this.isPlaying || this.isStarting) {
+    if (this.isPlaying) {
+      if (key != null) {
+        this.setKey(key)
+      }
+
+      if (octave != null && octave !== this.currentOctave) {
+        this.setOctave(octave)
+      }
+
+      return
+    }
+
+    if (this.isStarting) {
+      this.queueStartupNoteIntent({ key, octave })
       return
     }
 
@@ -504,6 +517,9 @@ export class DroneEngine {
       this.applyPendingStartupNoteIntent()
       this.updateFrequencies()
 
+      const scheduledKey = this.currentKey
+      const scheduledOctave = this.currentOctave
+
       this.voices.forEach((voice, index) => {
         voice.targetGain = this.getVoiceTargetGain(index)
         this.prepareVoiceGainForStart(voice, startTime, holdStopFade)
@@ -539,6 +555,9 @@ export class DroneEngine {
       this.lastMoodUpdateTime = 0
       this.startMoodLoop()
       this.logDiagnosticState('play')
+
+      // A note queued via start() while isStarting may still be pending after voices schedule.
+      this.commitPendingStartupNoteAfterPlay(scheduledKey, scheduledOctave)
     } finally {
       this.isStarting = false
       this.pendingStartupNote = null
@@ -675,7 +694,7 @@ export class DroneEngine {
 
   applyPendingStartupNoteIntent() {
     if (!this.pendingStartupNote) {
-      return
+      return false
     }
 
     if (this.pendingStartupNote.key != null) {
@@ -687,6 +706,34 @@ export class DroneEngine {
     }
 
     this.pendingStartupNote = null
+    return true
+  }
+
+  commitPendingStartupNoteAfterPlay(scheduledKey, scheduledOctave) {
+    if (!this.pendingStartupNote) {
+      return
+    }
+
+    const targetKey = this.pendingStartupNote.key ?? scheduledKey
+    const targetOctave = this.pendingStartupNote.octave ?? scheduledOctave
+    this.pendingStartupNote = null
+
+    if (targetKey === scheduledKey && targetOctave === scheduledOctave) {
+      this.currentKey = targetKey
+      this.currentOctave = targetOctave
+      return
+    }
+
+    if (!this.isPlaying || !this.isReady) {
+      this.currentKey = targetKey
+      this.currentOctave = targetOctave
+      return
+    }
+
+    this.pendingNoteChangeFrom = { key: scheduledKey, octave: scheduledOctave }
+    this.currentKey = targetKey
+    this.currentOctave = targetOctave
+    this.updateFrequencies()
   }
 
   setKey(key) {
@@ -5068,7 +5115,20 @@ export class DroneEngine {
 
     this.applyChoirEnsembleMix(effectiveTonalAmount, rampSeconds)
 
-    if (this.isPlaying && !skipAirLayers && !this.isStringsIsolationAirDisabled() && !this.isStringsHighRegisterAirDeclickActive() && !this.isMoonEntryBreathMorphActive() && !this.isMoonTransitionAuxHandoffActive()) {
+    // AIR breath modulation must respect the same transition guard as voice gains. During a
+    // note/register crossfade, startup fade, preset transition, or full-chain crossfade hold,
+    // the breath loop must NOT re-ramp the AIR gain/filters — otherwise it cancels/fights the
+    // scheduled crossfade-entry and deferred-AIR ramps (audible intensity stutter on note
+    // changes; re-charged AIR tail on Io entry).
+    if (
+      this.isPlaying
+      && this.canRampVoiceGainsFromBreathOrIntensity()
+      && !skipAirLayers
+      && !this.isStringsIsolationAirDisabled()
+      && !this.isStringsHighRegisterAirDeclickActive()
+      && !this.isMoonEntryBreathMorphActive()
+      && !this.isMoonTransitionAuxHandoffActive()
+    ) {
       this.applyAirBreathNoiseModulation(rampSeconds)
     }
   }
@@ -7808,7 +7868,8 @@ export class DroneEngine {
   // normal sound while it is silent under its (zeroed) moonTransitionGain. Mirrors the
   // settle portion of rebuildMoonAtSettledStateWhileSilent WITHOUT disposing/creating voices
   // (already fresh) and WITHOUT touching the group gain (the crossfade drives audibility).
-  settleNewMoonDeckWhileSilent(silentTime, snapRamp, transitionSnapshot = null) {
+  settleNewMoonDeckWhileSilent(silentTime, snapRamp, transitionSnapshot = null, options = {}) {
+    const { deferDecorativeBuildup = false } = options
     const effectiveTonalAmount = transitionSnapshot?.effectiveTonalAmount ?? this.getEffectiveTonalAmount()
 
     if (transitionSnapshot?.breathStartTime != null) {
@@ -7821,7 +7882,6 @@ export class DroneEngine {
     this.startAirBreathNoise(silentTime)
 
     this.applyIntensity(true, snapRamp)
-    this.applyReverbWet(snapRamp)
     this.applyVolume(snapRamp)
     this.applyVoicePanning(snapRamp)
     this.applyProjectionNodes(snapRamp)
@@ -7835,8 +7895,23 @@ export class DroneEngine {
       this.neutralizeMoodModulation(0)
     }
 
-    if (!this.isSterileDiagnosticActive()) {
-      this.applyAirBreathNoiseModulation(snapRamp)
+    // Decorative AIR breath noise + reverb wet are NOT settled to full while the deck is
+    // silent: the convolver would accumulate a full-strength tail (especially Io's airy
+    // shimmer) that is revealed as a "whoosh" the instant the output crossfade opens.
+    // Hold them at 0 here; startFullChainCrossfade ramps them in from the shared crossfade
+    // start so the tail builds with the audible signal instead of pre-charging.
+    if (deferDecorativeBuildup) {
+      this.snapParam(this.reverb.wet, 0, silentTime)
+
+      if (this.airBreathGain) {
+        this.snapParam(this.airBreathGain.gain, 0, silentTime)
+      }
+    } else {
+      this.applyReverbWet(snapRamp)
+
+      if (!this.isSterileDiagnosticActive()) {
+        this.applyAirBreathNoiseModulation(snapRamp)
+      }
     }
 
     this.voices.forEach((voice, index) => {
@@ -7995,9 +8070,20 @@ export class DroneEngine {
       this.snapParam(this.moonTransitionGain.gain, 0, silentTime)
     }
 
+    // Hold breath/intensity off the new deck's voice gains AND deferred AIR until the
+    // crossfade actually starts. ensureSignalChain → settle starts the breath loop, but the
+    // reverb-IR wait below can last up to reverbReadyMaxWaitSeconds; without this provisional
+    // guard the breath loop would re-charge the deferred AIR/reverb during that silent wait.
+    // startFullChainCrossfade overwrites this with the exact (startAt + duration) value.
+    ctx.deferDecorativeBuildup = true
+    this.fullChainCrossfadeVoiceHoldUntil = Tone.now() + reverbReadyMaxWaitSeconds + totalSeconds + 0.1
+
     // 4) Settle the new chain (already built + connected) to the new Moon's normal sound while
-    //    it is silent: voices started, air/aux running, EQ/reverb/width/trim at settled targets.
-    this.settleNewMoonDeckWhileSilent(silentTime, snapRamp, transitionSnapshot)
+    //    it is silent: voices started, aux running, EQ/width/trim at settled targets. Decorative
+    //    AIR breath noise + reverb wet are held at 0 and ramped in from the crossfade start.
+    this.settleNewMoonDeckWhileSilent(silentTime, snapRamp, transitionSnapshot, {
+      deferDecorativeBuildup: true,
+    })
     this.logFullChainSettleDiagnostics('settle-silent', transitionSnapshot, ctx, silentTime)
     this.logFullChainProbe('new-deck-built-muted', {}, ctx)
 
@@ -8057,6 +8143,25 @@ export class DroneEngine {
     this.fullChainCrossfadeVoiceHoldUntil = startAt + totalSeconds + 0.05
 
     this.rampFullChainCrossfade(oldDeck.fadeGain?.gain, this.moonTransitionGain?.gain, totalSeconds, startAt)
+
+    // Ramp the deferred decorative energy (AIR breath noise + reverb wet) in from the SAME
+    // shared start time over the crossfade window, so the new Moon's airy shimmer / reverb
+    // tail builds with the audible signal instead of being revealed pre-charged. Voice hold
+    // (above) keeps the breath loop from fighting these ramps until the crossfade completes.
+    if (ctx.deferDecorativeBuildup) {
+      if (this.reverb?.wet) {
+        this.holdAudioParamAtTime(this.reverb.wet, startAt)
+        this.reverb.wet.setValueAtTime(0, startAt)
+        this.reverb.wet.linearRampToValueAtTime(this.getReverbWet(), startAt + totalSeconds)
+      }
+
+      if (this.airBreathGain && !this.isSterileDiagnosticActive()) {
+        const airTarget = this.getAirBreathNoiseTargetGain()
+        this.holdAudioParamAtTime(this.airBreathGain.gain, startAt)
+        this.airBreathGain.gain.setValueAtTime(0, startAt)
+        this.airBreathGain.gain.linearRampToValueAtTime(airTarget, startAt + totalSeconds)
+      }
+    }
 
     this.logFullChainSettleDiagnostics('crossfade-start', ctx.transitionSnapshot, ctx, startAt)
     this.logFullChainProbe('crossfade-start', {
