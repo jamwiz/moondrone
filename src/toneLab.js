@@ -42,12 +42,18 @@ export const TONE_LAB_MASTER_TONE_DEFAULTS = {
   lowMidGainDb: 0,
   lowMidFrequencyHz: 320,
   lowMidQ: 0.5,
+  speakerPresenceGainDb: 0,
+  speakerPresenceFrequencyHz: 1600,
+  speakerPresenceQ: 0.55,
   highMidGainDb: 0,
   highMidFrequencyHz: 2500,
   highMidQ: 0.85,
   airGainDb: 0,
   airFrequencyHz: 4200,
   airQ: 0.5,
+  upperAirGainDb: 0,
+  upperAirFrequencyHz: 7000,
+  upperAirQ: 0.45,
 }
 
 /**
@@ -73,12 +79,18 @@ export const TONE_LAB_BUS_EQ_NEUTRAL = {
   lowMidGainDb: 0,
   lowMidFrequencyHz: 320,
   lowMidQ: 0.5,
+  speakerPresenceGainDb: 0,
+  speakerPresenceFrequencyHz: 1600,
+  speakerPresenceQ: 0.55,
   highMidGainDb: 0,
   highMidFrequencyHz: 2500,
   highMidQ: 0.85,
   airGainDb: 0,
   airFrequencyHz: 4200,
   airQ: 0.5,
+  upperAirGainDb: 0,
+  upperAirFrequencyHz: 7000,
+  upperAirQ: 0.45,
 }
 
 const TONE_LAB_BUS_EQ_KEYS = Object.keys(TONE_LAB_BUS_EQ_NEUTRAL)
@@ -122,9 +134,21 @@ export const TONE_LAB_TUNING = {
     // Broad peaking EQ around 200–500 Hz (center ~320 Hz).
     // Negative = less warmth/mud; positive = fuller body.
     // Range: -4 to +2 dB. Safe default: 0 (neutral).
-    lowMidGainDb: -20,
+    // Global clarity lift (Jun 2026): eased low-mid blanket + presence + air so car/
+    // phone playback reads brighter without harshness. Still negative in the presence
+    // region — warm/soft character preserved.
+    lowMidGainDb: -22,
     lowMidFrequencyHz: 320,
-    lowMidQ: 0.5,
+    lowMidQ: 0.1,
+
+    // Broad phone / small-speaker presence band (~1.2–2 kHz). Independent from
+    // highMidGainDb (harshness / upper-mid bite). Helps the drone read on iPhone,
+    // car, and small speakers without simply making it brighter.
+    // Positive = more projection / forwardness; negative = softer / more recessed.
+    // Range: -3 to +3 dB. Safe default: 0 (transparent).
+    speakerPresenceGainDb: 3,
+    speakerPresenceFrequencyHz: 1600,
+    speakerPresenceQ: 0.1,
 
     // Broad peaking EQ around 2–3 kHz (center ~2500 Hz) — the presence / harshness /
     // nasal / digital-edge / upper-harmonic-bite region. Targets fatigue from
@@ -133,15 +157,23 @@ export const TONE_LAB_TUNING = {
     // overtone articulation.
     // Range: -6 to +3 dB. Safe default: 0 (neutral).
     // Examples: -2 dB = smoother; -4 dB = very soft / meditation-oriented; +1 dB = more presence.
-    highMidGainDb: -14,
+    highMidGainDb: -3,
     highMidFrequencyHz: 2500,
     highMidQ: 0.85,
 
     // High shelf “air” band (~4.2 kHz). Added on top of AIR_SHIMMER air shelf.
     // Range: -2 to +3 dB. Safe default: 0 (no extra air from Tone Lab).
-    airGainDb: 12,
+    airGainDb: 12.5,
     airFrequencyHz: 4200,
-    airQ: 0.5,
+    airQ: 0.1,
+
+    // Upper-air / sparkle band (~7 kHz). Independent from airGainDb (~4.2 kHz).
+    // Controls shimmer, gloss, whisp, and top-end edge — not general openness.
+    // Positive = more sparkle and top-end openness; negative = softer, less hiss/whisp.
+    // Range: -3 to +3 dB. Safe default: 0 (transparent).
+    upperAirGainDb: 3,
+    upperAirFrequencyHz: 7600,
+    upperAirQ: 0.55,
   },
 
   // ---------------------------------------------------------------------------
@@ -160,7 +192,7 @@ export const TONE_LAB_TUNING = {
     // Global volume for the mood harmonic layer (True Orbit pair, per-voice orbit
     // cents, harmonic bloom redistribution, Super dual beats, bloom EQ level).
     // Range: 0–1.5. 0 = off; 1 = current behavior.
-    gain: .35,
+    gain: .3,
 
     // Tone control for the phase harmonic layer — bloom shelf swing and orbit shimmer.
     // Range: 0–1.5. 0 = darker/smoother; 1 = current; >1 = brighter (cautious).
@@ -177,7 +209,7 @@ export const TONE_LAB_TUNING = {
   breathAir: {
     // Global breath-noise level multiplier.
     // Range: 0–1.5. 0 = silence noise layer; 1 = current amount.
-    gain: .8,
+    gain: .5,
 
     // Shifts noise darker (0) ↔ brighter (1) via HPF/LPF endpoints.
     // 0.5 = calibrated to match current AIR_SHIMMER breath filter range.
@@ -216,17 +248,30 @@ export const TONE_LAB_TUNING = {
   dynamics: {
     // Final output trim before the master stage (replaces AIR overallLoudnessTrimDb).
     // Range: -6 to +2 dB. Safe default: -1 (matches current overall trim).
-    outputTrimDb: 3,
+    outputTrimDb: 1,
 
     // Brick-wall limiter ceiling (dBFS).
     // Range: -3 to -0.5 dB. Safe default: -1.5.
-    limiterCeilingDb: -1,
+    limiterCeilingDb: -0.5,
 
     // Compressor strength macro. 1 = current MASTER_TUNING glue level.
     // Range: 0–1.5. Lower = gentler/less squash; higher = more glue (watch pumping).
     // Maps to threshold, ratio, and makeup — not a blind crush.
     compressorAmount: 1.5,
+
+    // Final post-limiter output trim. Use mainly for attenuation after mastering.
+    // Positive values can exceed the limiter ceiling and may clip device output.
+    // Range: -12 to 0 dB. Safe default: 0 (transparent).
+    finalOutputTrimDb: 2,
   },
+}
+
+// Bypass/neutral dynamics targets (finite defaults for every field).
+export const TONE_LAB_DYNAMICS_NEUTRAL = {
+  outputTrimDb: 0,
+  limiterCeilingDb: -1.5,
+  compressorAmount: 1,
+  finalOutputTrimDb: 0,
 }
 
 // Compressor macro anchors (internal — do not edit unless you know the master chain).

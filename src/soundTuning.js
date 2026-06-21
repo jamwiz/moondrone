@@ -138,11 +138,11 @@ export const PRESET_LOW_MID_REGISTER_VOICING = {
     2: { 0: 0.78, 1: 0.86, 2: 0.82 },
     3: { 0: 0.8, 1: 0.88, 2: 0.84 },
   },
-  // Mimas (Pure): cavern low-mid — full −12 body, root eased back, +12 ring nudged
-  // up slightly for float (still trimmed vs original harsh voicing).
+  // Mimas (Pure): cavern low-mid — full −12 body at Low; Medium body eased back so
+  // the register does not jump forward on the lowest principal note.
   Pure: {
     2: { 0: 1.06, 1: 0.7, 3: 0.8 },
-    3: { 0: 1.06, 1: 0.72, 3: 0.84 },
+    3: { 0: 0.85, 1: 0.72, 3: 0.84 },
   },
   // Io (Cosmos): less low-mid push / bass-forward weight in the lower registers.
   // Ease root, low octave, fifth, and (Medium-only) the constant foundation root,
@@ -280,6 +280,15 @@ export const STRINGS_TUNING = {
     noiseFadeInSeconds: 0.5,
     shelfRampSeconds: 0.95,
     outputTrimRampSeconds: 0.52,
+  },
+  // Medium-register-only softening for the lowest body layer (voice index 0, the −12
+  // low octave). Trims the saw bite and rolls off upper partials so Titan's low body
+  // sits under the bow as foundation instead of speaking as a forward principal note.
+  // sawScale multiplies STRINGS_SAW_AMOUNT_BODY; harmonicRolloff progressively reduces
+  // partials from the 3rd up. Only Medium + index 0 is affected; Low/High/VH unchanged.
+  mediumBodySoftening: {
+    sawScale: 0.45,
+    harmonicRolloff: 0.4,
   },
   // High/VH: warmer principle timbre — less saw/harmonic glare on root body layers.
   highRegisterVoicing: {
@@ -493,12 +502,12 @@ export const PRESET_REGISTER_VOICE_GAIN_SCALE = {
   // Europa: extra low-mid relief at Low/Medium (all registers above use SHRUTI_REGISTER_DAMPING).
   Shruti: {
     [REGISTER_OCTAVES.LOW]: { 0: 0.88, 1: 0.86, 2: 0.84 },
-    [REGISTER_OCTAVES.MEDIUM]: { 0: 0.9, 1: 0.88, 2: 0.86 },
+    [REGISTER_OCTAVES.MEDIUM]: { 0: 0.76, 1: 0.82, 2: 0.86 },
   },
   // Mimas: Low/Med/High retain root-centered hierarchy; VH octave-up experiment.
   Pure: {
     [REGISTER_OCTAVES.LOW]: { 4: 0 },
-    [REGISTER_OCTAVES.MEDIUM]: { 1: 0.96, 3: 0.92, 4: 0 },
+    [REGISTER_OCTAVES.MEDIUM]: { 0: 0.83, 1: 0.96, 3: 0.92, 4: 0 },
     [REGISTER_OCTAVES.HIGH]: { 1: 0.88, 3: 0.88, 4: 0.55 },
     [REGISTER_OCTAVES.VERY_HIGH]: { 0: 0.58, 1: 0.24, 3: 1.75, 4: 0.26 },
   },
@@ -508,7 +517,9 @@ export const PRESET_REGISTER_VOICE_GAIN_SCALE = {
     [REGISTER_OCTAVES.VERY_HIGH]: { 3: 0.84, 4: 0.80, 5: 0.76 },
   },
   // Titan: High/VH principle gain trim; VH upper bloom unchanged from prior pass.
+  // Medium: ease −12 body / root push without thinning the bowed ensemble.
   Strings: {
+    [REGISTER_OCTAVES.MEDIUM]: { 0: 0.76, 1: 0.86, 2: 0.96 },
     [REGISTER_OCTAVES.HIGH]: { 0: 0.84, 1: 0.74, 2: 0.82 },
     [REGISTER_OCTAVES.VERY_HIGH]: { 0: 0.62, 1: 0.44, 2: 0.56, 3: 0.944, 4: 0.91, 5: 0.91 },
   },
@@ -534,9 +545,14 @@ export const PRESET_REGISTER_VOICE_GAIN_SCALE = {
 // Multiplies breathMotion × breathScale only — same envelope, no pitch LFO.
 export const PRESET_BREATH_VOICE_GAIN_SCALE = {
   Pure: {
-    0: 1.28,
+    0: 1.4,
     1: 1.04,
     3: 1.12,
+  },
+  // Europa: principal/root breathes more audibly — gain follow only, no pitch motion.
+  Shruti: {
+    1: 1.38,
+    0: 1.50,
   },
 }
 
@@ -754,6 +770,46 @@ export const PRESET_REGISTER_BUS_EQ = {
       minBlend: 0.90,
     },
   },
+}
+
+// Medium-register-only, key-following body notch. A single peaking dip whose center
+// frequency tracks the lowest body/principal layer (voice index 0 = −12 low octave)
+// of the currently selected key, so it tames that note's push on every key — not
+// just C — without a broad register-wide gain cut. Only listed presets and only the
+// Medium register are affected; Low/High/Very High and unlisted presets (Io/Cosmos,
+// Binaural) stay fully transparent. gainDb is a cut (negative). frequencyScale nudges
+// the notch above/below the index-0 fundamental if the pure fundamental sits too low.
+// Depths intentionally gentle: the Medium body is now softened at the source by
+// PRESET_MEDIUM_BODY_HARMONIC_SOFTENING / STRINGS_TUNING.mediumBodySoftening, so this
+// notch only lightly tames the residual fundamental push instead of carrying the whole
+// fix (avoids over-EQing the bass / making Medium thin).
+export const PRESET_MEDIUM_BODY_NOTCH = {
+  // Mimas: ease the cavern body fundamental so Medium does not jump forward.
+  Pure: { gainDb: -1.2, Q: 1.2, frequencyScale: 1 },
+  // Europa: gentle — preserve warmth, only shave the body push.
+  Shruti: { gainDb: -1.0, Q: 1.2, frequencyScale: 1 },
+  // Titan: strongest body of the three; slightly deeper, still narrow enough to keep bow.
+  Strings: { gainDb: -1.4, Q: 1.1, frequencyScale: 1 },
+}
+
+// Safety clamp for the key-following Medium body notch center frequency (Hz).
+export const PRESET_MEDIUM_BODY_NOTCH_FREQUENCY_RANGE = { min: 45, max: 320 }
+
+// Medium-register-only harmonic softening for the lowest body layer (voice index 0,
+// the −12 low octave). For the listed standard-voice presets, this replaces that
+// layer's default triangle waveform with a darker, more sine-like custom partial set
+// in Medium ONLY — the fundamental stays at full amplitude (foundation/bass gain
+// preserved) while the upper (odd) harmonics that make it "speak" like a second
+// principal voice are reduced. Low/High/Very High and unlisted presets (Io/Cosmos,
+// Binaural) keep their normal index-0 oscillator. Strings/Titan is softened separately
+// via STRINGS_TUNING.mediumBodySoftening (its body uses saw partials, not a triangle).
+// Partials are harmonic amplitudes [h1, h2, h3, ...]; a pure triangle is roughly
+// [1, 0, 0.111, 0, 0.04, ...], so these keep only a faint 3rd for warmth.
+export const PRESET_MEDIUM_BODY_HARMONIC_SOFTENING = {
+  // Mimas (Pure): triangle body → near-sine with a faint 3rd for warmth.
+  Pure: { partials: [1, 0, 0.05] },
+  // Europa (Shruti): keep a touch more warmth than Mimas, still far softer than triangle.
+  Shruti: { partials: [1, 0, 0.06] },
 }
 
 // =============================================================================
@@ -1098,7 +1154,7 @@ export const AIR_SHIMMER_TUNING = {
 
   // (1) Extra low-mid scoop in the 180–450 Hz congestion zone (additive to existing
   // mid voicing + projection low-mid cut). Negative = less mud, more clarity.
-  lowMidScoop: { frequency: 300, Q: 0.55, gainDb: -1.3 },
+  lowMidScoop: { frequency: 300, Q: 0.55, gainDb: -1.15 },
   presetLowMidScoop: {
     Pure: { frequency: 520, Q: 0.46, gainDb: -1.55 },
     Shruti: { frequency: 420, Q: 0.44, gainDb: -1.25 },
@@ -1106,7 +1162,7 @@ export const AIR_SHIMMER_TUNING = {
   },
 
   // (2) Gentle air shelf — opens the spectrum above ~4 kHz without a harsh treble spike.
-  airShelf: { frequency: 4200, Q: 0.5, gainDb: 0.9 },
+  airShelf: { frequency: 4200, Q: 0.5, gainDb: 1.05 },
   // Scale the air shelf down at High/Very High to avoid treble/limiter strain.
   airShelfRegisterScale: {
     [REGISTER_OCTAVES.HIGH]: 0.78,
@@ -1260,10 +1316,10 @@ export const PROJECTION_TUNING = {
   // iPhone perceived loudness after master-stage saturation/makeup trim — midrange
   // balance, not raw low-end. Upper bands unchanged (fatigue control).
   presence: [
-    { frequency: 950, Q: 0.9, gainDb: 1.75 },
-    { frequency: 1600, Q: 1.0, gainDb: 2.15 },
-    { frequency: 2600, Q: 1.1, gainDb: 1.2 },
-    { frequency: 3800, Q: 1.2, gainDb: 0.6 },
+    { frequency: 950, Q: 0.9, gainDb: 1.9 },
+    { frequency: 1600, Q: 1.0, gainDb: 2.35 },
+    { frequency: 2600, Q: 1.1, gainDb: 1.35 },
+    { frequency: 3800, Q: 1.2, gainDb: 0.7 },
   ],
 
   // (4) Mono translation. A widener placed BEFORE the reverb narrows the DRY

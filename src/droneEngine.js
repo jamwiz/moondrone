@@ -76,6 +76,9 @@ import {
   PRESET_BUS_EQ_REGISTER_BLEND,
   PRESET_BUS_EQ_ALWAYS_ON_BLEND,
   PRESET_REGISTER_BUS_EQ,
+  PRESET_MEDIUM_BODY_NOTCH,
+  PRESET_MEDIUM_BODY_NOTCH_FREQUENCY_RANGE,
+  PRESET_MEDIUM_BODY_HARMONIC_SOFTENING,
   PRESET_LOW_MID_REGISTER_VOICING,
   PRESET_VOICE_OSCILLATOR_TYPES,
   PRESET_VOICE_PRESENCE_MULTIPLIER,
@@ -101,6 +104,7 @@ import {
   resolveToneLabMasterTone,
   resolveToneLabBusEqTargets,
   TONE_LAB_BUS_EQ_NEUTRAL,
+  TONE_LAB_DYNAMICS_NEUTRAL,
   scaleMoonPhaseHarmonicMotion,
   scaleMoonPhaseHarmonicOrbitCents,
 } from './toneLab'
@@ -251,6 +255,7 @@ export class DroneEngine {
     this.droneBusEq = null
     this.droneMidVoicingEq = null
     this.presetLowMidEq = null
+    this.presetMediumBodyEq = null
     this.presetBodyMidEq = null
     this.presetUpperMidEq = null
     // Master output stage (mobile mastering). Drone bus runs through the full
@@ -262,6 +267,7 @@ export class DroneEngine {
     this.masterSaturator = null
     this.masterMakeup = null
     this.masterLimiter = null
+    this.masterFinalOutputTrim = null
     this.masterMeter = null
     this.masterMeterPre = null
     this.masterMeterPostCompressor = null
@@ -306,8 +312,10 @@ export class DroneEngine {
     this.toneLabHighpass = null
     this.toneLabLowpass = null
     this.toneLabLowMid = null
+    this.toneLabSpeakerPresence = null
     this.toneLabHighMid = null
     this.toneLabAir = null
+    this.toneLabUpperAir = null
     this.voices = []
     this.breathFrame = null
     this.breathStartTime = null
@@ -4020,6 +4028,7 @@ export class DroneEngine {
     const decibels = userDecibels + this.droneMetronomeHeadroomDb + this.getDroneBalanceTrimDb() + this.getToneLabOutputTrimDb()
     this.rampParam(this.output.volume, decibels, rampSeconds)
     this.applyMasterLimiterCeiling(rampSeconds)
+    this.applyMasterFinalOutputTrim(rampSeconds)
   }
 
   applyDroneMetronomeHeadroom() {
@@ -4721,6 +4730,18 @@ export class DroneEngine {
     this.snapParam(this.presetLowMidEq.Q, lowMidQ, now)
     this.snapParam(this.presetLowMidEq.gain, lowMidGain, now)
 
+    if (this.presetMediumBodyEq) {
+      const {
+        gain: mediumBodyGain,
+        frequency: mediumBodyFrequency,
+        Q: mediumBodyQ,
+      } = this.getPresetMediumBodyNotchSettings()
+
+      this.snapParam(this.presetMediumBodyEq.frequency, mediumBodyFrequency, now)
+      this.snapParam(this.presetMediumBodyEq.Q, mediumBodyQ, now)
+      this.snapParam(this.presetMediumBodyEq.gain, mediumBodyGain, now)
+    }
+
     if (this.presetBodyMidEq) {
       this.snapParam(this.presetBodyMidEq.frequency, bodyMidFrequency, now)
       this.snapParam(this.presetBodyMidEq.Q, bodyMidQ, now)
@@ -5009,6 +5030,31 @@ export class DroneEngine {
     }
   }
 
+  // Medium-register-only, key-following body notch. Returns a transparent (0 dB)
+  // setting outside Medium register, for unlisted presets, or during sterile
+  // diagnostics. The center frequency tracks the index-0 (−12 low octave) body
+  // fundamental of the current key so the dip follows every key, clamped to a safe
+  // range. Independent of the bus-EQ blend system so it also works for Strings
+  // (Titan), which has no PRESET_BUS_EQ_PROFILES entry.
+  getPresetMediumBodyNotchSettings() {
+    const config = PRESET_MEDIUM_BODY_NOTCH[this.currentPreset.name]
+    const fallbackFrequency = this.presetMediumBodyEq?.frequency.value ?? 110
+
+    if (
+      !config
+      || this.currentOctave !== MEDIUM_REGISTER_OCTAVE
+      || this.isSterileDiagnosticActive()
+    ) {
+      return { gain: 0, frequency: fallbackFrequency, Q: config?.Q ?? 1.2 }
+    }
+
+    const range = PRESET_MEDIUM_BODY_NOTCH_FREQUENCY_RANGE
+    const bodyFrequency = this.getVoiceFrequency(0) * (config.frequencyScale ?? 1)
+    const frequency = this.clamp(bodyFrequency, range.min, range.max)
+
+    return { gain: config.gainDb, frequency, Q: config.Q }
+  }
+
   getPresetBusEqSettings(tonalAmount = this.getBaseTonalAmount()) {
     const profile = this.getPresetBusEqProfile()
     const blend = this.getPresetBusEqBlend(tonalAmount)
@@ -5062,6 +5108,18 @@ export class DroneEngine {
     this.rampParam(this.presetLowMidEq.frequency, lowMidFrequency, rampSeconds)
     this.rampParam(this.presetLowMidEq.Q, lowMidQ, rampSeconds)
     this.rampParam(this.presetLowMidEq.gain, lowMidGain, rampSeconds)
+
+    if (this.presetMediumBodyEq) {
+      const {
+        gain: mediumBodyGain,
+        frequency: mediumBodyFrequency,
+        Q: mediumBodyQ,
+      } = this.getPresetMediumBodyNotchSettings()
+
+      this.rampParam(this.presetMediumBodyEq.frequency, mediumBodyFrequency, rampSeconds)
+      this.rampParam(this.presetMediumBodyEq.Q, mediumBodyQ, rampSeconds)
+      this.rampParam(this.presetMediumBodyEq.gain, mediumBodyGain, rampSeconds)
+    }
 
     if (this.presetBodyMidEq) {
       this.rampParam(this.presetBodyMidEq.frequency, bodyMidFrequency, rampSeconds)
@@ -5810,6 +5868,16 @@ export class DroneEngine {
     return this.isAirShimmerEnabled() ? AIR_SHIMMER_TUNING.overallLoudnessTrimDb : 0
   }
 
+  getToneLabFinalOutputTrimDb() {
+    if (TONE_LAB_TUNING.enabled) {
+      const trimDb = TONE_LAB_TUNING.dynamics.finalOutputTrimDb ?? TONE_LAB_DYNAMICS_NEUTRAL.finalOutputTrimDb
+
+      return Number.isFinite(trimDb) ? trimDb : 0
+    }
+
+    return TONE_LAB_DYNAMICS_NEUTRAL.finalOutputTrimDb
+  }
+
   getEffectiveLimiterCeilingDb() {
     if (TONE_LAB_TUNING.enabled) {
       return TONE_LAB_TUNING.dynamics.limiterCeilingDb
@@ -5824,6 +5892,20 @@ export class DroneEngine {
     }
 
     this.rampParam(this.masterLimiter.threshold, this.getEffectiveLimiterCeilingDb(), rampSeconds)
+  }
+
+  applyMasterFinalOutputTrim(rampSeconds = TRANSITION_TUNING.volumeRampSeconds) {
+    if (!this.masterFinalOutputTrim) {
+      return
+    }
+
+    this.rampParam(
+      this.masterFinalOutputTrim.volume,
+      this.getToneLabFinalOutputTrimDb(),
+      rampSeconds,
+      Tone.now(),
+      'masterFinalOutputTrim.volume',
+    )
   }
 
   applyBinauralSafetyLimiting(rampSeconds = TRANSITION_TUNING.volumeRampSeconds) {
@@ -5931,12 +6013,18 @@ export class DroneEngine {
       ['lowMid.gain', this.toneLabLowMid.gain, targets.lowMidGainDb, neutral.lowMidGainDb],
       ['lowMid.frequency', this.toneLabLowMid.frequency, targets.lowMidFrequencyHz, neutral.lowMidFrequencyHz],
       ['lowMid.Q', this.toneLabLowMid.Q, targets.lowMidQ, neutral.lowMidQ],
+      ['speakerPresence.gain', this.toneLabSpeakerPresence.gain, targets.speakerPresenceGainDb, neutral.speakerPresenceGainDb],
+      ['speakerPresence.frequency', this.toneLabSpeakerPresence.frequency, targets.speakerPresenceFrequencyHz, neutral.speakerPresenceFrequencyHz],
+      ['speakerPresence.Q', this.toneLabSpeakerPresence.Q, targets.speakerPresenceQ, neutral.speakerPresenceQ],
       ['highMid.gain', this.toneLabHighMid.gain, targets.highMidGainDb, neutral.highMidGainDb],
       ['highMid.frequency', this.toneLabHighMid.frequency, targets.highMidFrequencyHz, neutral.highMidFrequencyHz],
       ['highMid.Q', this.toneLabHighMid.Q, targets.highMidQ, neutral.highMidQ],
       ['air.gain', this.toneLabAir.gain, targets.airGainDb, neutral.airGainDb],
       ['air.frequency', this.toneLabAir.frequency, targets.airFrequencyHz, neutral.airFrequencyHz],
       ['air.Q', this.toneLabAir.Q, targets.airQ, neutral.airQ],
+      ['upperAir.gain', this.toneLabUpperAir.gain, targets.upperAirGainDb, neutral.upperAirGainDb],
+      ['upperAir.frequency', this.toneLabUpperAir.frequency, targets.upperAirFrequencyHz, neutral.upperAirFrequencyHz],
+      ['upperAir.Q', this.toneLabUpperAir.Q, targets.upperAirQ, neutral.upperAirQ],
     ]
     const resolvedTargets = {}
 
@@ -6016,8 +6104,35 @@ export class DroneEngine {
     })
   }
 
+  // Medium-register-only darker body waveform for the lowest layer (index 0). Returns
+  // a softened custom partial set (fundamental preserved, upper harmonics reduced) for
+  // the listed standard-voice presets so the low body reads as bass support, not a
+  // forward principal note. Null everywhere else, leaving the normal oscillator type.
+  getMediumBodyHarmonicSofteningPartials(index) {
+    if (index !== 0 || this.currentOctave !== MEDIUM_REGISTER_OCTAVE) {
+      return null
+    }
+
+    if (this.isStringsLayer(index)) {
+      return null
+    }
+
+    return PRESET_MEDIUM_BODY_HARMONIC_SOFTENING[this.currentPreset.name]?.partials ?? null
+  }
+
   getVoiceOscillatorOptions(index) {
     const frequency = this.getVoiceFrequency(index)
+    const softBodyPartials = this.getMediumBodyHarmonicSofteningPartials(index)
+
+    if (softBodyPartials) {
+      return {
+        frequency,
+        type: 'custom',
+        partials: softBodyPartials,
+        partialCount: softBodyPartials.length,
+      }
+    }
+
     const partials = this.getAirShimmerHarmonicPartials(index)
 
     if (partials) {
@@ -6324,6 +6439,15 @@ export class DroneEngine {
   buildStringsSineSawPartials(index) {
     let sawAmount = STRINGS_SAW_AMOUNT_UPPER
     const registerVoicing = index <= 2 ? this.getStringsHighRegisterVoicing() : null
+    // Medium-register-only softening for the lowest body layer (index 0): trim the saw
+    // bite + roll off upper partials so Titan's low octave sits under the bow as
+    // foundation instead of a forward principal note. Low/High/VH and other layers
+    // keep their normal saw partials.
+    const mediumBodySoftening = (
+      index === 0 && this.currentOctave === MEDIUM_REGISTER_OCTAVE
+        ? STRINGS_TUNING.mediumBodySoftening
+        : null
+    )
 
     if (index <= 2) {
       sawAmount = STRINGS_SAW_AMOUNT_BODY
@@ -6335,8 +6459,12 @@ export class DroneEngine {
       sawAmount = STRINGS_SAW_AMOUNT_MID
     }
 
+    if (mediumBodySoftening?.sawScale != null) {
+      sawAmount *= mediumBodySoftening.sawScale
+    }
+
     const partials = [1]
-    const harmonicRolloff = registerVoicing?.principleHarmonicRolloff ?? 0
+    const harmonicRolloff = registerVoicing?.principleHarmonicRolloff ?? mediumBodySoftening?.harmonicRolloff ?? 0
 
     for (let harmonic = 2; harmonic <= STRINGS_PARTIAL_COUNT; harmonic += 1) {
       let amplitude = sawAmount / harmonic
@@ -7652,6 +7780,7 @@ export class DroneEngine {
       projectionLowMidCut: this.projectionLowMidCut,
       projectionPresenceEqs: this.projectionPresenceEqs,
       presetLowMidEq: this.presetLowMidEq,
+      presetMediumBodyEq: this.presetMediumBodyEq,
       presetBodyMidEq: this.presetBodyMidEq,
       presetUpperMidEq: this.presetUpperMidEq,
       airShelfEq: this.airShelfEq,
@@ -7661,8 +7790,10 @@ export class DroneEngine {
       toneLabHighpass: this.toneLabHighpass,
       toneLabLowpass: this.toneLabLowpass,
       toneLabLowMid: this.toneLabLowMid,
+      toneLabSpeakerPresence: this.toneLabSpeakerPresence,
       toneLabHighMid: this.toneLabHighMid,
       toneLabAir: this.toneLabAir,
+      toneLabUpperAir: this.toneLabUpperAir,
       // Auxiliary layers.
       airBreathNoise: this.airBreathNoise,
       airBreathHighpass: this.airBreathHighpass,
@@ -7730,6 +7861,7 @@ export class DroneEngine {
       deck.projectionLowMidCut,
       ...(deck.projectionPresenceEqs ?? []),
       deck.presetLowMidEq,
+      deck.presetMediumBodyEq,
       deck.presetBodyMidEq,
       deck.presetUpperMidEq,
       deck.airShelfEq,
@@ -7739,8 +7871,10 @@ export class DroneEngine {
       deck.toneLabHighpass,
       deck.toneLabLowpass,
       deck.toneLabLowMid,
+      deck.toneLabSpeakerPresence,
       deck.toneLabHighMid,
       deck.toneLabAir,
+      deck.toneLabUpperAir,
       deck.airBreathHighpass,
       deck.airBreathLowpass,
       deck.airBreathGain,
@@ -8992,12 +9126,25 @@ export class DroneEngine {
   // Outgoing voices fade current -> 0 on the shared smoothstep curve. Paired with the
   // smoothstep fade-in below, equal steady levels keep the linear sum constant across
   // the overlap (equal-gain crossfade — no midpoint amplitude dip for a drone).
-  rampOutgoingVoiceGain(voice, startTime = Tone.now(), duration = NOTE_FADE_OUT_SECONDS) {
+  rampOutgoingVoiceGain(voice, startTime = Tone.now(), duration = NOTE_FADE_OUT_SECONDS, options = {}) {
     const param = voice.gain.gain
+    const { accurateStart = false } = options
+
+    // Note changes interrupt the breath loop mid-ramp. Breath gain motion is
+    // scheduled with param.rampTo (a setTargetAtTime exponential approach), and
+    // some engines (notably iOS WebKit) mis-read the held value after
+    // cancelAndHoldAtTime during a setTargetAtTime curve, snapping the fade
+    // start toward the ramp target. The resulting step scales with breath depth,
+    // so it is only audible on Titan/Strings (deep breath gain scale) at high
+    // Intensity. Read the true instantaneous value in JS first and anchor the
+    // fade-out to it so the outgoing voice can never jump.
+    const accurateGain = accurateStart && typeof param.getValueAtTime === 'function'
+      ? param.getValueAtTime(startTime)
+      : null
 
     this.holdAudioParamAtTime(param, startTime)
 
-    const currentGain = Math.max(param.value, 0)
+    const currentGain = Math.max(accurateGain != null ? accurateGain : param.value, 0)
 
     this.logClickDiagnostic('outgoing-fade', { currentGain, duration })
 
@@ -9322,7 +9469,9 @@ export class DroneEngine {
         })
       }
 
-      this.rampOutgoingVoiceGain(voice, now, voiceOutgoingFadeDuration)
+      this.rampOutgoingVoiceGain(voice, now, voiceOutgoingFadeDuration, {
+        accurateStart: !presetChange && this.isStringsPreset(),
+      })
     })
 
     // Hand the just-faded-out set to its own dispose timer immediately, so a
@@ -9686,7 +9835,8 @@ export class DroneEngine {
   }
 
   // Build the shared master stage exactly once. Signal flow:
-  //   masterPreLowShelf → masterInput → compressor → [saturator?] → makeup → limiter → destination
+  //   masterPreLowShelf → masterInput → compressor → [saturator?] → makeup → limiter
+  //   → finalOutputTrim → destination
   // When masterSaturationEnabled is false, compressor connects directly to makeup (A/B diagnostic).
   ensureMasterOutput() {
     if (this.masterChainReady) {
@@ -9695,8 +9845,9 @@ export class DroneEngine {
 
     if (MASTER_TUNING.masterStageBypassEnabled) {
       // HARD BYPASS: legacy limiter-only chain. drone output → pass-through → limiter
-      // → destination. No compressor/saturator/makeup/pre-shelf/metering exist.
-      this.masterLimiter = new Tone.Limiter(LEGACY_MASTER_LIMITER_DB).toDestination()
+      // → post-limiter trim → destination. No compressor/saturator/makeup/pre-shelf/metering exist.
+      this.masterFinalOutputTrim = new Tone.Volume(this.getToneLabFinalOutputTrimDb()).toDestination()
+      this.masterLimiter = new Tone.Limiter(LEGACY_MASTER_LIMITER_DB).connect(this.masterFinalOutputTrim)
       // masterPreLowShelf is the node ensureSignalChain connects the drone output to,
       // so alias the pass-through gain to it. metronomeGain connects to masterLimiter.
       this.masterPreLowShelf = new Tone.Gain(1).connect(this.masterLimiter)
@@ -9720,7 +9871,8 @@ export class DroneEngine {
         ratio: MASTER_TUNING.compressorRatio,
         makeupGainDb: MASTER_TUNING.makeupGainDb,
       }
-    this.masterLimiter = new Tone.Limiter(this.getEffectiveLimiterCeilingDb()).toDestination()
+    this.masterFinalOutputTrim = new Tone.Volume(this.getToneLabFinalOutputTrimDb()).toDestination()
+    this.masterLimiter = new Tone.Limiter(this.getEffectiveLimiterCeilingDb()).connect(this.masterFinalOutputTrim)
     this.masterMakeup = new Tone.Volume(compressorSettings.makeupGainDb).connect(this.masterLimiter)
     this.masterSaturator = this.createMasterSaturator()
     this.masterCompressor = new Tone.Compressor({
@@ -9802,6 +9954,7 @@ export class DroneEngine {
       this.masterSaturator,
       this.masterMakeup,
       this.masterLimiter,
+      this.masterFinalOutputTrim,
     ]
 
     nodes.forEach((node) => {
@@ -9819,6 +9972,7 @@ export class DroneEngine {
     this.masterSaturator = null
     this.masterMakeup = null
     this.masterLimiter = null
+    this.masterFinalOutputTrim = null
     this.masterMeter = null
     this.masterMeterPre = null
     this.masterMeterPostCompressor = null
@@ -9855,6 +10009,7 @@ export class DroneEngine {
         this.projectionLowMidCut,
         ...this.projectionPresenceEqs,
         this.presetLowMidEq,
+        this.presetMediumBodyEq,
         this.presetBodyMidEq,
         this.presetUpperMidEq,
         this.droneMidVoicingEq,
@@ -9863,8 +10018,10 @@ export class DroneEngine {
         this.toneLabHighpass,
         this.toneLabLowpass,
         this.toneLabLowMid,
+        this.toneLabSpeakerPresence,
         this.toneLabHighMid,
         this.toneLabAir,
+        this.toneLabUpperAir,
         this.droneBusEq,
         this.output,
         this.moonTransitionGain,
@@ -10748,24 +10905,36 @@ export class DroneEngine {
     this.connectMasterMeterPreTap()
     const toneLabActive = TONE_LAB_TUNING.enabled
     const masterTone = resolveToneLabMasterTone(TONE_LAB_TUNING.masterTone)
+    this.toneLabUpperAir = new Tone.Filter({
+      type: 'peaking',
+      frequency: masterTone.upperAirFrequencyHz,
+      Q: masterTone.upperAirQ,
+      gain: toneLabActive ? masterTone.upperAirGainDb : 0,
+    }).connect(this.output)
     this.toneLabAir = new Tone.Filter({
       type: 'highshelf',
       frequency: masterTone.airFrequencyHz,
       Q: masterTone.airQ,
       gain: toneLabActive ? masterTone.airGainDb : 0,
-    }).connect(this.output)
+    }).connect(this.toneLabUpperAir)
     this.toneLabHighMid = new Tone.Filter({
       type: 'peaking',
       frequency: masterTone.highMidFrequencyHz,
       Q: masterTone.highMidQ,
       gain: toneLabActive ? masterTone.highMidGainDb : 0,
     }).connect(this.toneLabAir)
+    this.toneLabSpeakerPresence = new Tone.Filter({
+      type: 'peaking',
+      frequency: masterTone.speakerPresenceFrequencyHz,
+      Q: masterTone.speakerPresenceQ,
+      gain: toneLabActive ? masterTone.speakerPresenceGainDb : 0,
+    }).connect(this.toneLabHighMid)
     this.toneLabLowMid = new Tone.Filter({
       type: 'peaking',
       frequency: masterTone.lowMidFrequencyHz,
       Q: masterTone.lowMidQ,
       gain: toneLabActive ? masterTone.lowMidGainDb : 0,
-    }).connect(this.toneLabHighMid)
+    }).connect(this.toneLabSpeakerPresence)
     this.toneLabLowpass = new Tone.Filter({
       type: 'lowpass',
       frequency: toneLabActive ? masterTone.highCutHz : 20000,
@@ -10813,12 +10982,21 @@ export class DroneEngine {
       Q: 0.52,
       gain: 0,
     }).connect(this.presetUpperMidEq)
+    // Medium-register key-following body notch (PRESET_MEDIUM_BODY_NOTCH). Transparent
+    // (0 dB) except in Medium register on listed presets, where it dips the index-0
+    // body fundamental of the selected key. Sits inline with the preset bus EQ trio.
+    this.presetMediumBodyEq = new Tone.Filter({
+      type: 'peaking',
+      frequency: 110,
+      Q: 1.2,
+      gain: 0,
+    }).connect(this.presetBodyMidEq)
     this.presetLowMidEq = new Tone.Filter({
       type: 'peaking',
       frequency: SHRUTI_BUS_EQ.lowMidFrequency,
       Q: SHRUTI_BUS_EQ.lowMidQ,
       gain: 0,
-    }).connect(this.presetBodyMidEq)
+    }).connect(this.presetMediumBodyEq)
 
     // Projection presence + low-mid decongestion. Created at 0 dB (transparent)
     // and ramped in/out by applyProjectionNodes(). Built downstream-first so each
