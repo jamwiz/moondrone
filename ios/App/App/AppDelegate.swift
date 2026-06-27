@@ -12,8 +12,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return true
     }
 
-    /// Playback category ignores the hardware Ring/Silent switch so Moondrone is audible
-    /// after the user taps Play. Does not start audio — WebAudio/Tone.js still waits for Play.
+    /// `.playback` with an active session is required so Moondrone stays audible when the
+    /// Ring/Silent switch is ON and continues on the lock screen (with `UIBackgroundModes: audio`).
+    /// Does not start playback — WebAudio/Tone.js still waits for the user to tap Play.
     private func configureAudioSessionForPlayback() {
         do {
             let session = AVAudioSession.sharedInstance()
