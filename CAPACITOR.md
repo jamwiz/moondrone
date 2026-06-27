@@ -26,23 +26,46 @@ Moondrone uses [Capacitor](https://capacitorjs.com/) to wrap the existing Vite +
 
 ## Branding Source Assets
 
-Canonical source images live in `assets/branding/`:
+Canonical source images live in `assets/branding/` (see `scripts/generate-cap-assets.mjs`):
 
-| File | Size | Purpose |
-|------|------|---------|
-| `moondrone-icon.png` | 1024×1024 | App icon source |
-| `moondrone-splash-icon-transparent.png` | 1024×1024 | Android 12+ splash icon (transparent, dark background) |
-| `moondrone-splash-master.png` | 2732×2732 | iOS splash source only (not used for Android native splash) |
-| `moondrone-splash-phone-ratio.png` | 1290×2732 | Alternate/reference only (not used for generation) |
+| File | Purpose |
+|------|---------|
+| `icon.png` | App icon source (1024×1024; required for `npm run cap:assets`) |
+| `moondrone-splash-icon-transparent.png` | Android 12+ splash icon (transparent, dark background) |
+| `moondrone-splash-master.png` | iOS full-screen splash source (staged as `splash.png` during generation) |
 
 `scripts/generate-cap-assets.mjs` runs platform-specific generation:
 
-- **iOS** — `moondrone-icon.png` + `moondrone-splash-master.png` (full-screen splash artwork)
-- **Android** — `moondrone-icon.png` for launcher icons; transparent `moondrone-splash-icon-transparent.png` copied to `drawable/splash_icon.png` for the Android 12+ splash API
+- **iOS** — `icon.png` + staged `moondrone-splash-master.png` → `ios/App/App/Assets.xcassets/`
+- **Android** — `icon.png` for launcher icons; transparent `moondrone-splash-icon-transparent.png` copied to `drawable/splash_icon.png` for the Android 12+ splash API
 
-Android launch theme (`AppTheme.NoActionBarLaunch`) uses `Theme.SplashScreen` with background `#090807` and `@drawable/splash_icon` — not the full-screen `moondrone-splash-master.png`.
+Android launch theme (`AppTheme.NoActionBarLaunch`) uses `Theme.SplashScreen` with background `#090807` and `@drawable/splash_icon` — not the full-screen splash master.
 
 Background color for generation matches the app palette: `#090807`.
+
+Committed native outputs (regenerate with `npm run cap:assets` after changing sources):
+
+- **iOS:** `ios/App/App/Assets.xcassets/AppIcon.appiconset/`, `Splash.imageset/`
+- **Android:** `android/app/src/main/res/mipmap-*`, `drawable/splash_icon.png`
+
+## iOS packaging — web assets in `dist/`
+
+After `npm run build`, confirm these paths exist under `dist/` before `npm run cap:sync`:
+
+| Path | Used by |
+|------|---------|
+| `block.high.mp3`, `block.low.mp3` | Metronome (Wood) |
+| `triangle.open.mp3`, `triangle.closed.mp3` | Metronome (Triangle) |
+| `moons/moon.png`, `moons/Europa.png`, `moons/Titan.png`, `moons/Io.png`, `moons/Binaural.png` | Moon artwork |
+| `atmospheres/space.png`, `atmospheres/desert.png`, `atmospheres/forest.png` | Background atmospheres |
+| `index.html`, `assets/index-*.js`, `assets/index-*.css` | Capacitor WebView shell |
+
+Capacitor copies `dist/` into `ios/App/App/public/` on sync (that folder is gitignored). Asset URLs in the app are root-relative (`/block.high.mp3`, `/moons/…`) and resolve correctly in the iOS WebView.
+
+**iOS native requirements (already configured):**
+
+- `ios/App/App/Info.plist` — `UIBackgroundModes` includes `audio` (background/lock-screen playback)
+- `src/useAppLifecycle.js` — `ENABLE_IOS_BACKGROUND_AUDIO = true`
 
 ## npm Scripts
 
@@ -93,6 +116,8 @@ npm run cap:open:android   # Windows / macOS / Linux
 npm run cap:open:ios       # macOS only (Xcode required to build/run)
 ```
 
+**Dev output meter:** use `npm run dev -- --host` or `npm run preview -- --host` in a browser (not a production Capacitor build). Press Play, tap **Meter** at the bottom-right. Use the **Dev output gain** slider (−6 to +6 dB) to calibrate loudness; see `README.md` for how to translate Dev gain into a `finalOutputTrimDb` change in `toneLab.js`.
+
 Then run the app from Android Studio or Xcode on a device or emulator.
 
 ### Optional: live reload against Vite dev server
@@ -111,16 +136,21 @@ Replace `YOUR_LAN_IP` with your machine's local network IP (not `localhost`). Re
 
 ## App Lifecycle
 
-Moondrone does **not** support background audio in v1. When the app goes to the background or the page hides, playback stops cleanly and the UI returns to Ready.
+Platform behavior (`ENABLE_IOS_BACKGROUND_AUDIO = true` in `src/useAppLifecycle.js`):
+
+**iOS (native):** drone and metronome continue during background and lock screen. Requires `UIBackgroundModes: audio` in `ios/App/App/Info.plist` (already configured). On foreground return while playback was active, the app calls `droneEngine.resumeAudioContextForLifecycle()` to wake a suspended Web Audio context.
+
+**Android and web:** when the app backgrounds or the page hides, playback stops cleanly and the UI returns to Ready.
 
 Implementation:
 
 - `src/useAppLifecycle.js` — registers lifecycle listeners from `App.jsx`
-- `droneEngine.stopForLifecycle()` — immediate stop (metronome timer off, voice gains to 0); manual Stop uses a **3 s** fade
-- `@capacitor/app` — `appStateChange` when `isActive === false` on native
-- `visibilitychange` + `pagehide` — WebView and browser dev fallbacks
+- `droneEngine.stopForLifecycle()` — immediate stop (Android/web path); manual Stop uses a **3 s** fade
+- `droneEngine.resumeAudioContextForLifecycle()` — iOS foreground wake (does not restart playback or rebuild voices)
+- `@capacitor/app` — `appStateChange` when `isActive === false` (Android stop) / `true` (iOS resume attempt)
+- `visibilitychange` + `pagehide` / `pageshow` — WebView and browser dev fallbacks
 
-User settings (key, register, preset, sliders) are preserved. Foreground return does not auto-resume — user taps Play again.
+User settings (key, register, preset, sliders) are preserved. Android/web foreground return does not auto-resume — user taps Play again.
 
 See `TECH_NOTES.md` for full behavior and `TODO.md` for device validation checklist.
 
@@ -166,8 +196,9 @@ After opening a native build on real devices:
 2. Verify Tone.js / Web Audio starts on first Play tap
 3. Verify drone + metronome balance on phone speakers
 4. Test speaker, headphones, and silent mode
-5. Test backgrounding, lock screen, and return to app — should stop cleanly and show Ready (handler implemented; verify on device)
-6. Confirm metronome scheduling and drone playback stay stable
-7. Decide distribution target (TestFlight vs. App Store)
+5. Test **iOS** backgrounding and lock screen — playback should continue; foreground return should not leave audio stuck/silent
+6. Test **Android** backgrounding and lock screen — should stop cleanly and show Ready
+7. Confirm metronome scheduling and drone playback stay stable
+8. Decide distribution target (TestFlight vs. App Store)
 
 See `TODO.md` for the full checklist.

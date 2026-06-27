@@ -49,7 +49,7 @@ git reset --hard stable-post-phone-revert
 - `src/moonLabels.js` — display labels and descriptions for user-facing Moon language
 - `src/MetronomeMenu.jsx` — compact metronome header popover
 - `src/InfoModal.jsx` — About and Help modal (tabs, Escape/backdrop close, accessible dialog)
-- `src/useAppLifecycle.js` — stops drone and metronome when the app backgrounds or the page hides
+- `src/useAppLifecycle.js` — platform lifecycle handler (`ENABLE_IOS_BACKGROUND_AUDIO`; iOS background playback, Android/web stop-on-hide)
 - `src/soundTuning.js` — **single editable sound-design file** (preset voice gains, balance trims, Intensity/Breath/Reverb shaping, output/EQ, metronome tone, `AIR_SHIMMER_TUNING`, `MASTER_TUNING`). `droneEngine.js` imports values; routing stays in the engine.
 - `src/toneLab.js` — **Tone Lab macros** (`TONE_LAB_TUNING`): master bus EQ, harmonic/breath/mood-harmonic macros, stereo width, and dynamics. Shared bus path for all Moons including Binaural. Re-exported from `soundTuning.js`. Edit here for subjective tone passes without touching engine routing.
 - `src/droneEngine.js` — audio startup, drone playback, metronome scheduling, synthesis, effects, preset transitions, gain staging, Tone Lab wiring, `stopForLifecycle()`
@@ -771,9 +771,19 @@ On iPhone, silent mode can mute browser Web Audio. If audio looks like it is run
 
 ## App Lifecycle
 
-Implemented in `src/useAppLifecycle.js` (wired from `App.jsx`). Does not change sound design, presets, routing, or manual Stop fade timing.
+Implemented in `src/useAppLifecycle.js` (wired from `App.jsx`). Constant: `ENABLE_IOS_BACKGROUND_AUDIO = true`. Does not change sound design, presets, routing, or manual Stop fade timing.
 
-### v1 behavior (no background audio)
+### Platform behavior
+
+**iOS (native) — background audio required**
+
+When the app backgrounds or the device locks while playback is active:
+
+1. Drone and metronome **keep playing** (requires `UIBackgroundModes: audio` in `ios/App/App/Info.plist`)
+2. UI remains **Drone Active** if it was playing before background
+3. On foreground return, `resumeAudioContextForLifecycle()` wakes a suspended Web Audio context when needed
+
+**Android and web — stop on background**
 
 When the app backgrounds, locks, or the page hides:
 
@@ -783,28 +793,32 @@ When the app backgrounds, locks, or the page hides:
 4. UI syncs to **Ready** — `isPlaying` and `isMetronomePlaying` become false
 5. User settings (key, register, preset, tuning, sliders) are preserved
 
-On foreground/resume: nothing auto-starts. User must tap Play again.
+On foreground/resume (Android/web): nothing auto-starts. User must tap Play again.
 
 ### Triggers
 
-| Event | Where |
-|-------|-------|
-| `document.visibilitychange` when `document.hidden` | Browser dev + Capacitor WebView |
-| `window.pagehide` | iOS bfcache / navigation |
-| `@capacitor/app` `appStateChange` when `isActive === false` | Native iOS/Android only |
+| Event | iOS | Android / web |
+|-------|-----|---------------|
+| `document.visibilitychange` when hidden | Continue playback | Stop |
+| `window.pagehide` | Continue (no stop listener) | Stop |
+| `@capacitor/app` `appStateChange` when inactive | Continue playback | Stop |
+| Foreground / `isActive === true` | Resume suspended context if playing | N/A (already stopped) |
 
 ### `stopForLifecycle()` vs `stop()`
 
 | Method | Use | Fade |
 |--------|-----|------|
 | `stop()` | User taps Stop | 3 s voice fade-out (quick initial drop) |
-| `stopForLifecycle()` | Background/interruption | Immediate gain to 0 |
+| `stopForLifecycle()` | Android/web background interruption | Immediate gain to 0 |
 
 Both leave oscillators and the signal chain intact so the next Play can use the normal **4 s** startup fade (`START_FADE_SECONDS`).
 
 ### Device validation still required
 
-Confirm on real hardware: clean stop on background/lock, Ready UI on return, no metronome burst or resume blast, normal Play restart.
+Confirm on real hardware:
+
+- **iOS:** playback continues through background and lock screen; foreground return has no stuck/silent context; lock-screen controls behave as expected
+- **Android:** clean stop on background/lock, Ready UI on return, no metronome burst, normal Play restart
 
 ## Capacitor Wrapper (Active)
 
@@ -839,7 +853,7 @@ Source images in `assets/branding/`:
 
 ### Workflow
 
-Develop in the browser with `npm run dev`. When testing in a native shell, run `npm run cap:sync` then open the platform project. The sound engine preset/mix architecture is unchanged by the wrapper; lifecycle stop-on-background is handled in `useAppLifecycle.js`.
+Develop in the browser with `npm run dev`. When testing in a native shell, run `npm run cap:sync` then open the platform project. The sound engine preset/mix architecture is unchanged by the wrapper; lifecycle behavior is handled in `useAppLifecycle.js` (iOS background audio vs Android/web stop-on-hide).
 
 ### Remaining Device Validation
 
@@ -847,7 +861,7 @@ Develop in the browser with `npm run dev`. When testing in a native shell, run `
 - **Web Audio in native shell** — confirm `Tone.start()` and context resume work on first Play tap in iOS and Android WebViews
 - **Drone + metronome balance** — only major open audio item; test on phone speakers inside the wrapper
 - **Audio session / silent mode** — test speaker, headphones, and silent switch
-- **App lifecycle** — handler implemented; verify stop-on-background and no auto-resume on device
+- **App lifecycle** — handler implemented; verify iOS background/lock-screen playback and Android stop-on-background on device
 - **Long-running playback** — metronome scheduling and drone stability
 - **Distribution target** — TestFlight / internal vs. public App Store
 

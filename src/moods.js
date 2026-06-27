@@ -31,10 +31,6 @@ export const MOODS = [
 
 export const DEFAULT_MOOD_ID = 'full'
 
-export function getMoodName(moodId) {
-  return MOODS.find((mood) => mood.id === moodId)?.name ?? moodId
-}
-
 export function getMoodShortName(moodId) {
   const mood = MOODS.find((entry) => entry.id === moodId)
   return mood?.short ?? mood?.name ?? moodId

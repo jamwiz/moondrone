@@ -79,17 +79,23 @@ Single-screen, mobile-first, **moon-centered celestial instrument**. Source: `sr
 
 ## App Lifecycle (Current)
 
-When the app backgrounds, locks, or the page hides:
+Platform behavior (`src/useAppLifecycle.js`, `ENABLE_IOS_BACKGROUND_AUDIO = true`):
 
-- `useAppLifecycle.js` calls `droneEngine.stopForLifecycle()`
-- Drone voice gains go to 0 immediately; metronome timer stops; breath loop and Strings drift stop
-- UI syncs to **Ready** (`isPlaying` / `isMetronomePlaying` false)
-- Key, register, preset, tuning, and slider settings are preserved
-- No auto-resume on foreground — user must tap Play again
+**iOS (native):**
 
-Triggers: `document.visibilitychange` (hidden), `window.pagehide`, and `@capacitor/app` `appStateChange` when `isActive === false` on native.
+- Drone and metronome **continue** during background and lock screen (`UIBackgroundModes: audio` in `ios/App/App/Info.plist`)
+- On foreground return while playback was active, the app calls `droneEngine.resumeAudioContextForLifecycle()` to wake a suspended Web Audio context
+- UI stays **Drone Active** while backgrounded if playback was running
 
-- Manual **Stop** uses a **3 s** fade with a quick initial drop. Lifecycle stop is immediate to avoid suspended-context resume glitches.
+**Android and web:**
+
+- On background, lock, or page hide: `droneEngine.stopForLifecycle()` runs immediately
+- Drone voice gains go to 0; metronome timer stops; breath loop and Strings drift stop
+- UI syncs to **Ready**; settings preserved; user taps Play again
+
+Triggers: `document.visibilitychange` (hidden), `window.pagehide` (non-iOS background path), and `@capacitor/app` `appStateChange` when `isActive === false` (Android stop path).
+
+- Manual **Stop** uses a **3 s** fade with a quick initial drop. Lifecycle stop (Android/web) is immediate to avoid suspended-context resume glitches.
 
 ## Sound Engine Status
 
@@ -145,7 +151,7 @@ Re-check these only during wrapper testing or if audio code changes:
 - `src/moods.js` — Mood definitions and tuning (bloom/eclipse/orbit/dual beats)
 - `src/MetronomeMenu.jsx` — compact metronome header popover
 - `src/InfoModal.jsx` — About and Help modal content and behavior
-- `src/useAppLifecycle.js` — background/foreground lifecycle handler (stops playback on hide)
+- `src/useAppLifecycle.js` — platform lifecycle handler (iOS background audio; Android/web stop-on-hide)
 - `src/droneEngine.js` — Tone.js audio engine: drone voices, metronome scheduling, gain staging, effects, preset transitions, `stopForLifecycle()`
 - `src/soundTuning.js` — centralized sound-design parameters (presets, trims, Intensity/Breath/Reverb, output/EQ, metronome)
 - `src/presets.js` — re-exports preset and Binaural data from `soundTuning.js`

@@ -252,17 +252,17 @@ export const TONE_LAB_TUNING = {
 
     // Brick-wall limiter ceiling (dBFS).
     // Range: -3 to -0.5 dB. Safe default: -1.5.
-    limiterCeilingDb: -1.5,
+    limiterCeilingDb: -1,
 
     // Compressor strength macro. 1 = current MASTER_TUNING glue level.
     // Range: 0–1.5. Lower = gentler/less squash; higher = more glue (watch pumping).
     // Maps to threshold, ratio, and makeup — not a blind crush.
-    compressorAmount: 1.25,
+    compressorAmount: 1.5,
 
     // Final post-limiter output trim. Use mainly for attenuation after mastering.
     // Positive values can exceed the limiter ceiling and may clip device output.
-    // Range: -12 to 0 dB. Safe default: 0 (transparent).
-    finalOutputTrimDb: 6,
+    // Calibrated 2026 via dev output meter (+3 dB vs prior 0 dB default).
+    finalOutputTrimDb: 21,
   },
 }
 

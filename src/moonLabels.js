@@ -1,7 +1,7 @@
 // User-facing moon names for sound presets. Internal preset IDs (Pure, Shruti, …)
 // stay unchanged in the engine and soundTuning.js — only display labels change here.
 
-export const PRESET_MOON_LABELS = {
+const PRESET_MOON_LABELS = {
   Pure: 'Mimas',
   Shruti: 'Europa',
   Strings: 'Titan',

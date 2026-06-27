@@ -80,7 +80,8 @@ Metronome samples live in `public/` (`block.high.mp3`, `block.low.mp3`, `triangl
 - Projection is always enabled internally for phone-speaker clarity and perceived loudness; there is no Projection UI toggle, and no master-gain or limiter change.
 - First Play waits for reverb impulse response to load (prevents startup click/pop)
 - Master Volume UI shows 0–100% (default 100%); internal output is capped for clean phone speakers
-- On background, lock, or page hide: drone and metronome stop immediately; UI returns to Ready; settings are preserved; user must tap Play again (no background audio)
+- **iOS (native):** drone and metronome continue during background and lock screen (`UIBackgroundModes: audio`); on foreground return the app attempts to resume a suspended Web Audio context while playback was active
+- **Android and web:** on background, lock, or page hide, drone and metronome stop immediately; UI returns to Ready; settings are preserved; user must tap Play again
 
 ### Dev transition controls (browser only)
 
@@ -122,6 +123,30 @@ npm run dev
 npm run build
 npm run preview
 ```
+
+### Dev output meter (development builds only)
+
+The final master output has a passive analyzer tap and a **dev-only calibration gain** in dev builds only. It is **not included in production** (`npm run build`).
+
+1. Start the app: `npm run dev -- --host` or `npm run preview -- --host`
+2. Open the app in a browser (use the LAN URL when using `--host`)
+3. Press **Play** on the moon
+4. Tap the small **Meter** button at the bottom-right (hidden until opened)
+5. Watch Peak / Hold / RMS, clip status, level bars, and spectrum while changing Moons or registers
+
+#### Loudness calibration with dev output gain
+
+Use the **Dev output gain** slider (−6 to +6 dB, 0.5 dB steps) to find the best production trim **without changing production tuning**:
+
+1. Pick a reference Moon, register, and Master Volume (usually 100%).
+2. Press Play and open **Meter**.
+3. Note **Prod trim** (current production `finalOutputTrimDb` from Tone Lab — unchanged by this tool).
+4. Raise or lower **Dev gain** until Peak Hold sits where you want (typically **−3 to −1 dB** under clip, no **Near clip** / **CLIP** on phone speakers).
+5. Read **Effective** = Prod trim + Dev gain. The dB offset you applied on Dev gain is the adjustment to consider for `finalOutputTrimDb` in `src/toneLab.js` — apply that change manually in Tone Lab when ready; the dev slider does not write production constants.
+
+Example: Prod trim **−1.0 dB**, Dev gain **+1.5 dB** sounds right → try setting `finalOutputTrimDb` to **+0.5 dB** in Tone Lab, then reset Dev gain to **0** and verify again.
+
+The panel remembers open/closed state for the browser session (`sessionStorage` key `moondrone.devMeter.visible`). Dev output gain always starts at **0 dB** each load.
 
 ## Mobile App (Capacitor)
 

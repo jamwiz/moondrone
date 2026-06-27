@@ -2,29 +2,37 @@ import { useEffect } from 'react'
 import { Capacitor } from '@capacitor/core'
 import { droneEngine } from './droneEngine'
 
-// Reversible experiment: do not stop playback merely because the tab/app backgrounds.
-// Set to false to restore stop-on-background everywhere (previous v1 behavior).
-export const ENABLE_BACKGROUND_AUDIO_EXPERIMENT = true
+// Production: iOS native app continues drone/metronome during background and lock screen.
+// Requires UIBackgroundModes audio in ios/App/App/Info.plist.
+// Set to false only to restore stop-on-background on iOS (not recommended for release).
+export const ENABLE_IOS_BACKGROUND_AUDIO = true
 
-// Temporary diagnostics for foreground resume — set false to silence console output.
-const BACKGROUND_AUDIO_RESUME_DEBUG = true
+// Temporary diagnostics for foreground resume — set true locally when debugging lifecycle resume.
+const BACKGROUND_AUDIO_RESUME_DEBUG = false
 
-function shouldStopPlaybackOnVisibilityOrPageHide() {
-  return !ENABLE_BACKGROUND_AUDIO_EXPERIMENT
+function isIosNativePlatform() {
+  return Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'ios'
 }
 
-// Native appStateChange: when the experiment is on, only iOS skips the lifecycle stop
-// (Android keeps v1 stop-on-inactive until foreground-service support exists).
+function shouldAllowIosBackgroundPlayback() {
+  return ENABLE_IOS_BACKGROUND_AUDIO && isIosNativePlatform()
+}
+
+function shouldStopPlaybackOnVisibilityOrPageHide() {
+  return !shouldAllowIosBackgroundPlayback()
+}
+
+// Native appStateChange: iOS may continue in background; Android keeps stop-on-inactive.
 function shouldStopPlaybackOnNativeAppStateInactive() {
-  if (!ENABLE_BACKGROUND_AUDIO_EXPERIMENT) {
-    return true
+  if (shouldAllowIosBackgroundPlayback()) {
+    return false
   }
 
-  return Capacitor.getPlatform() !== 'ios'
+  return true
 }
 
 function shouldAttemptLifecycleResume(uiIsPlaying) {
-  return ENABLE_BACKGROUND_AUDIO_EXPERIMENT
+  return shouldAllowIosBackgroundPlayback()
     && uiIsPlaying
     && droneEngine.isPlaying
 }
@@ -57,13 +65,15 @@ async function attemptForegroundResume(source, uiIsPlaying, uiIsMetronomePlaying
     logBackgroundAudioResume(source, {
       ...baseLog,
       skipped: true,
-      reason: !ENABLE_BACKGROUND_AUDIO_EXPERIMENT
-        ? 'experiment disabled'
-        : !uiIsPlaying
-          ? 'ui not playing'
-          : !droneEngine.isPlaying
-            ? 'engine not playing'
-            : 'unknown',
+      reason: !ENABLE_IOS_BACKGROUND_AUDIO
+        ? 'ios background audio disabled'
+        : !isIosNativePlatform()
+          ? 'not ios native'
+          : !uiIsPlaying
+            ? 'ui not playing'
+            : !droneEngine.isPlaying
+              ? 'engine not playing'
+              : 'unknown',
     })
     return
   }
@@ -140,7 +150,7 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
       void attemptForegroundResume('window-focus', uiIsPlaying, uiIsMetronomePlaying)
     }
 
-    // pagehide can fire during iOS backgrounding — skip it when continuing in background.
+    // pagehide can fire during iOS backgrounding — skip stop when iOS background audio is enabled.
     const onPageHide = () => {
       if (shouldStopPlaybackOnVisibilityOrPageHide()) {
         stopPlaybackForLifecycle(setIsPlaying, setIsMetronomePlaying)
@@ -172,7 +182,7 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
             return
           }
 
-          if (ENABLE_BACKGROUND_AUDIO_EXPERIMENT && Capacitor.getPlatform() === 'ios') {
+          if (shouldAllowIosBackgroundPlayback()) {
             void attemptForegroundResume('appStateChange-active', uiIsPlaying, uiIsMetronomePlaying)
           }
         }).then((handle) => {

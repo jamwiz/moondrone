@@ -269,6 +269,11 @@ export class DroneEngine {
     this.masterMakeup = null
     this.masterLimiter = null
     this.masterFinalOutputTrim = null
+    this.devOutputGain = null
+    this.devOutputGainDb = 0
+    this.devOutputMeterPeak = null
+    this.devOutputMeterRms = null
+    this.devOutputAnalyser = null
     this.masterMeter = null
     this.masterMeterPre = null
     this.masterMeterPostCompressor = null
@@ -368,6 +373,9 @@ export class DroneEngine {
     this.metronomeClickEq = null
     this.metronomeGain = null
     this.metronomeChainReady = null
+    this.metronomeUsesSampleFallback = false
+    this.metronomeFallbackOsc = null
+    this.metronomeFallbackVolume = null
     this.droneMetronomeHeadroomDb = 0
     this.transitionDiagnosticsEnabled = false
     this.pendingBinauralTransitionRamp = null
@@ -563,7 +571,9 @@ export class DroneEngine {
       this.moodStartTime = window.performance.now()
       this.lastMoodUpdateTime = 0
       this.startMoodLoop()
-      this.logDiagnosticState('play')
+      if (import.meta.env.DEV) {
+        this.logDiagnosticState('play')
+      }
 
       // A note queued via start() while isStarting may still be pending after voices schedule.
       this.commitPendingStartupNoteAfterPlay(scheduledKey, scheduledOctave)
@@ -8709,7 +8719,7 @@ export class DroneEngine {
   }
 
   // Lifecycle-only AudioContext wake — does not start playback, rebuild voices, or retune.
-  // Returns diagnostic fields for background-audio experiment logging.
+  // Returns diagnostic fields for iOS background-audio lifecycle resume logging.
   async resumeAudioContextForLifecycle() {
     const context = Tone.getContext()
     const rawContext = context.rawContext
@@ -9940,6 +9950,149 @@ export class DroneEngine {
     return new Tone.WaveShaper(curve)
   }
 
+  // Passive final-output analyzer tap (dev builds only). In dev, masterFinalOutputTrim
+  // → devOutputGain → destination; meters/analyser fan out from devOutputGain.
+  connectMasterFinalOutputToDestination() {
+    if (import.meta.env.DEV) {
+      this.ensureDevOutputGainNode()
+      this.masterFinalOutputTrim.connect(this.devOutputGain)
+      this.devOutputGain.toDestination()
+      this.attachDevOutputAnalyzerTap()
+      return
+    }
+
+    this.masterFinalOutputTrim.toDestination()
+  }
+
+  ensureDevOutputGainNode() {
+    if (!import.meta.env.DEV) {
+      return
+    }
+
+    if (!this.devOutputGain) {
+      this.devOutputGain = new Tone.Volume(this.devOutputGainDb)
+    }
+  }
+
+  clampDevOutputGainDb(db) {
+    const stepped = Math.round(db * 2) / 2
+
+    return Math.max(-6, Math.min(6, stepped))
+  }
+
+  setDevOutputGainDb(db) {
+    if (!import.meta.env.DEV) {
+      return this.devOutputGainDb
+    }
+
+    this.devOutputGainDb = this.clampDevOutputGainDb(db)
+
+    if (this.devOutputGain) {
+      this.devOutputGain.volume.value = this.devOutputGainDb
+    }
+
+    return this.devOutputGainDb
+  }
+
+  getDevOutputGainDb() {
+    return import.meta.env.DEV ? this.devOutputGainDb : 0
+  }
+
+  getDevOutputCalibrationInfo() {
+    if (!import.meta.env.DEV) {
+      return null
+    }
+
+    const productionTrimDb = this.getToneLabFinalOutputTrimDb()
+    const devGainDb = this.devOutputGainDb
+    const effectiveTotalDb = productionTrimDb + devGainDb
+
+    return {
+      productionTrimDb,
+      devGainDb,
+      effectiveTotalDb,
+    }
+  }
+
+  attachDevOutputAnalyzerTap() {
+    const tapNode = import.meta.env.DEV ? this.devOutputGain : null
+
+    if (!tapNode || this.devOutputMeterPeak) {
+      return
+    }
+
+    this.devOutputMeterPeak = new Tone.Meter({ smoothing: 0.15, normalRange: false })
+    this.devOutputMeterRms = new Tone.Meter({ smoothing: 0.97, normalRange: false })
+    this.devOutputAnalyser = new Tone.Analyser('fft', 256)
+    tapNode.connect(this.devOutputMeterPeak)
+    tapNode.connect(this.devOutputMeterRms)
+    tapNode.connect(this.devOutputAnalyser)
+  }
+
+  getDevOutputMeterSnapshot() {
+    if (!import.meta.env.DEV || !this.devOutputMeterPeak || !this.devOutputMeterRms) {
+      return null
+    }
+
+    const peakDb = this.devOutputMeterPeak.getValue()
+    const rmsDb = this.devOutputMeterRms.getValue()
+    const fftValues = this.devOutputAnalyser?.getValue?.()
+    const calibration = this.getDevOutputCalibrationInfo()
+
+    return {
+      peakDb: typeof peakDb === 'number' && Number.isFinite(peakDb) ? peakDb : -Infinity,
+      rmsDb: typeof rmsDb === 'number' && Number.isFinite(rmsDb) ? rmsDb : -Infinity,
+      clip: Number.isFinite(peakDb) && peakDb >= -0.5,
+      nearClip: Number.isFinite(peakDb) && peakDb >= -3,
+      analyserAvailable: Boolean(this.devOutputAnalyser),
+      fft: fftValues instanceof Float32Array
+        ? Array.from(fftValues)
+        : Array.isArray(fftValues)
+          ? fftValues
+          : null,
+      productionTrimDb: calibration?.productionTrimDb ?? 0,
+      devGainDb: calibration?.devGainDb ?? 0,
+      effectiveTotalDb: calibration?.effectiveTotalDb ?? 0,
+    }
+  }
+
+  disposeDevOutputAnalyzerTap() {
+    if (!import.meta.env.DEV) {
+      return
+    }
+
+    ;[this.devOutputMeterPeak, this.devOutputMeterRms, this.devOutputAnalyser].forEach((node) => {
+      try {
+        node?.dispose()
+      } catch {
+        // Dev-only teardown.
+      }
+    })
+
+    this.devOutputMeterPeak = null
+    this.devOutputMeterRms = null
+    this.devOutputAnalyser = null
+  }
+
+  disposeDevOutputGainNode() {
+    if (!import.meta.env.DEV) {
+      return
+    }
+
+    try {
+      this.devOutputGain?.dispose()
+    } catch {
+      // Dev-only teardown.
+    }
+
+    this.devOutputGain = null
+  }
+
+  disposeDevOutputMonitoring() {
+    this.disposeDevOutputAnalyzerTap()
+    this.disposeDevOutputGainNode()
+  }
+
   // Build the shared master stage exactly once. Signal flow:
   //   masterPreLowShelf → masterInput → compressor → [saturator?] → makeup → limiter
   //   → finalOutputTrim → destination
@@ -9952,7 +10105,8 @@ export class DroneEngine {
     if (MASTER_TUNING.masterStageBypassEnabled) {
       // HARD BYPASS: legacy limiter-only chain. drone output → pass-through → limiter
       // → post-limiter trim → destination. No compressor/saturator/makeup/pre-shelf/metering exist.
-      this.masterFinalOutputTrim = new Tone.Volume(this.getToneLabFinalOutputTrimDb()).toDestination()
+      this.masterFinalOutputTrim = new Tone.Volume(this.getToneLabFinalOutputTrimDb())
+      this.connectMasterFinalOutputToDestination()
       this.masterLimiter = new Tone.Limiter(LEGACY_MASTER_LIMITER_DB).connect(this.masterFinalOutputTrim)
       // masterPreLowShelf is the node ensureSignalChain connects the drone output to,
       // so alias the pass-through gain to it. metronomeGain connects to masterLimiter.
@@ -9977,7 +10131,8 @@ export class DroneEngine {
         ratio: MASTER_TUNING.compressorRatio,
         makeupGainDb: MASTER_TUNING.makeupGainDb,
       }
-    this.masterFinalOutputTrim = new Tone.Volume(this.getToneLabFinalOutputTrimDb()).toDestination()
+    this.masterFinalOutputTrim = new Tone.Volume(this.getToneLabFinalOutputTrimDb())
+    this.connectMasterFinalOutputToDestination()
     this.masterLimiter = new Tone.Limiter(this.getEffectiveLimiterCeilingDb()).connect(this.masterFinalOutputTrim)
     this.masterMakeup = new Tone.Volume(compressorSettings.makeupGainDb).connect(this.masterLimiter)
     this.masterSaturator = this.createMasterSaturator()
@@ -10048,6 +10203,8 @@ export class DroneEngine {
       window.clearInterval(this.masterDiagnosticsTimer)
       this.masterDiagnosticsTimer = null
     }
+
+    this.disposeDevOutputMonitoring()
 
     const nodes = [
       this.masterMeterPre,
@@ -10460,6 +10617,29 @@ export class DroneEngine {
     return isDownbeat ? 'blockHigh' : 'blockLow'
   }
 
+  resolveMetronomeSampleUrl(relativeUrl) {
+    if (typeof window === 'undefined' || !relativeUrl) {
+      return relativeUrl
+    }
+
+    try {
+      return new URL(relativeUrl, window.location.href).href
+    } catch {
+      return relativeUrl
+    }
+  }
+
+  logMetronomeSampleLoadFailure(sampleId, relativeUrl, details = {}) {
+    const resolvedUrl = this.resolveMetronomeSampleUrl(relativeUrl)
+
+    console.error('[Moondrone metronome] Sample load failed', {
+      sampleId,
+      url: relativeUrl,
+      resolvedUrl,
+      ...details,
+    })
+  }
+
   // Soft pre-flight check. On a web dev server this catches a 404 that returns an
   // HTML page instead of audio. It must NEVER be fatal on its own, because native
   // Capacitor WebViews (iOS/Android custom schemes) frequently serve local assets
@@ -10467,25 +10647,40 @@ export class DroneEngine {
   // to fetch() — which previously threw here and silently killed the entire
   // metronome before any Tone.Player was even created (root cause of the iPhone
   // "Play does nothing" bug). The authoritative gate is decode success, verified
-  // later by Tone.loaded() + verifyMetronomePlayersLoaded().
+  // later by Tone.loaded() + collectMetronomeSampleLoadFailures().
   async verifyMetronomeSampleUrl(url) {
+    const resolvedUrl = this.resolveMetronomeSampleUrl(url)
+
     try {
       const response = await fetch(url)
 
       if (!response.ok) {
-        console.warn(`Metronome sample preflight: unexpected status ${response.status} for ${url}`)
+        console.warn('[Moondrone metronome] Sample preflight failed', {
+          url,
+          resolvedUrl,
+          status: response.status,
+          statusText: response.statusText,
+        })
         return
       }
 
       const contentType = response.headers.get('content-type') || ''
 
       if (contentType && !contentType.includes('audio') && !contentType.includes('octet-stream')) {
-        console.warn(`Metronome sample preflight: unexpected content-type "${contentType}" for ${url}`)
+        console.warn('[Moondrone metronome] Sample preflight unexpected content-type', {
+          url,
+          resolvedUrl,
+          contentType,
+        })
       }
     } catch (error) {
       // fetch() can reject for custom-scheme/CORS reasons in native WebViews even
       // when the asset loads fine via Tone.Player. Do not block on it.
-      console.warn(`Metronome sample preflight skipped for ${url}`, error)
+      console.warn('[Moondrone metronome] Sample preflight skipped', {
+        url,
+        resolvedUrl,
+        error: error?.message ?? String(error),
+      })
     }
   }
 
@@ -10501,28 +10696,80 @@ export class DroneEngine {
   }
 
   createMetronomePlayer(url) {
-    const player = new Tone.Player(url)
+    const resolvedUrl = this.resolveMetronomeSampleUrl(url)
+    const player = new Tone.Player({
+      url,
+      onerror: (error) => {
+        this.logMetronomeSampleLoadFailure('player', url, {
+          resolvedUrl,
+          error: error?.message ?? String(error),
+          phase: 'Tone.Player.onerror',
+        })
+      },
+    })
+
     player.connect(this.metronomeTrim)
     return player
   }
 
-  verifyMetronomePlayersLoaded() {
+  collectMetronomeSampleLoadFailures() {
     const failures = []
 
-    Object.entries(this.metronomePlayerPools).forEach(([sampleId, players]) => {
+    Object.entries(this.metronomePlayerPools ?? {}).forEach(([sampleId, players]) => {
+      const relativeUrl = METRONOME_SAMPLE_URLS[sampleId]
+
       players.forEach((player, index) => {
         if (player.loaded) {
           return
         }
 
-        failures.push(`${sampleId}[${index}] ${METRONOME_SAMPLE_URLS[sampleId]}`)
-        console.error(`Metronome sample load failure: ${METRONOME_SAMPLE_URLS[sampleId]}`)
+        failures.push({
+          sampleId,
+          index,
+          url: relativeUrl,
+          resolvedUrl: this.resolveMetronomeSampleUrl(relativeUrl),
+          playerState: player.state,
+          bufferLoaded: Boolean(player.buffer),
+        })
+
+        this.logMetronomeSampleLoadFailure(sampleId, relativeUrl, {
+          index,
+          playerState: player.state,
+          bufferLoaded: Boolean(player.buffer),
+          phase: 'Tone.loaded',
+        })
       })
     })
 
-    if (failures.length > 0) {
-      throw new Error(`Metronome failed to load ${failures.length} sample(s)`)
+    return failures
+  }
+
+  ensureMetronomeFallbackClick() {
+    if (this.metronomeFallbackVolume) {
+      return
     }
+
+    this.metronomeFallbackOsc = new Tone.Oscillator({
+      type: 'sine',
+      frequency: METRONOME_CLICK_FREQUENCY,
+    })
+    this.metronomeFallbackVolume = new Tone.Volume(-100)
+    this.metronomeFallbackOsc.connect(this.metronomeFallbackVolume)
+    this.metronomeFallbackVolume.connect(this.metronomeTrim)
+    this.metronomeFallbackOsc.start()
+  }
+
+  triggerMetronomeFallbackClick(time, targetDb) {
+    if (!this.metronomeFallbackVolume) {
+      return
+    }
+
+    const volumeParam = this.metronomeFallbackVolume.volume
+
+    volumeParam.cancelScheduledValues(time)
+    volumeParam.setValueAtTime(targetDb + METRONOME_ATTACK_SOFTENING_DB, time)
+    volumeParam.linearRampToValueAtTime(targetDb, time + METRONOME_ATTACK_RAMP_SECONDS)
+    volumeParam.exponentialRampToValueAtTime(-100, time + 0.045)
   }
 
   async ensureMetronomeChain() {
@@ -10567,10 +10814,24 @@ export class DroneEngine {
           triangleClosed: [this.createMetronomePlayer(METRONOME_SAMPLE_URLS.triangleClosed)],
         }
         await Tone.loaded()
-        this.verifyMetronomePlayersLoaded()
+        const sampleFailures = this.collectMetronomeSampleLoadFailures()
+
+        if (sampleFailures.length > 0) {
+          this.metronomeUsesSampleFallback = true
+          this.ensureMetronomeFallbackClick()
+          console.warn('[Moondrone metronome] Using oscillator fallback click because sample loading failed', {
+            failureCount: sampleFailures.length,
+            failures: sampleFailures,
+          })
+        } else {
+          this.metronomeUsesSampleFallback = false
+        }
       } catch (error) {
         this.metronomeChainReady = null
-        console.error('Metronome sample load failure', error)
+        console.error('[Moondrone metronome] Metronome chain setup failed', {
+          message: error?.message ?? String(error),
+          error,
+        })
         throw error
       }
     })()
@@ -10618,63 +10879,79 @@ export class DroneEngine {
       return
     }
 
-    if (!this.metronomePlayerPools) {
+    if (!this.metronomePlayerPools && !this.metronomeUsesSampleFallback) {
       return
     }
 
     const isDownbeat = this.metronomeMeasureBeatIndex === 0
     const sampleId = this.getMetronomeSampleId(isDownbeat)
-    const player = this.getMetronomePlayer(sampleId)
     const beatsPerMeasure = this.getMetronomeActiveBeatsPerMeasure()
-
-    if (!player) {
-      this.metronomeMeasureBeatIndex += 1
-
-      if (this.metronomeMeasureBeatIndex >= beatsPerMeasure) {
-        this.advanceMetronomeMeasure()
-      }
-
-      return
-    }
-
-    if (!player.loaded) {
-      console.error(`Metronome sample load failure: ${METRONOME_SAMPLE_URLS[sampleId]}`)
-      this.metronomeMeasureBeatIndex += 1
-
-      if (this.metronomeMeasureBeatIndex >= beatsPerMeasure) {
-        this.advanceMetronomeMeasure()
-      }
-
-      return
-    }
-
     const playbackDb = this.isStraightMetronome()
       ? (this.metronomeSoundMode === 'triangle' ? METRONOME_REGULAR_DB : METRONOME_ACCENT_DB)
       : (isDownbeat ? METRONOME_ACCENT_DB : METRONOME_REGULAR_DB)
     const sampleDb = sampleId === 'triangleOpen' ? METRONOME_TRIANGLE_OPEN_SAMPLE_DB : 0
     const targetDb = playbackDb + sampleDb
 
+    const scheduleBeatVisual = () => {
+      if (this.onMetronomeBeat) {
+        const downbeat = isDownbeat
+        Tone.Draw.schedule(() => {
+          try {
+            this.onMetronomeBeat?.(downbeat)
+          } catch {
+            // A visual hook must never disrupt audio scheduling.
+          }
+        }, time)
+      }
+    }
+
+    const advanceBeat = () => {
+      this.metronomeMeasureBeatIndex += 1
+
+      if (this.metronomeMeasureBeatIndex >= beatsPerMeasure) {
+        this.advanceMetronomeMeasure()
+      }
+    }
+
+    if (this.metronomeUsesSampleFallback) {
+      this.triggerMetronomeFallbackClick(time, targetDb)
+      scheduleBeatVisual()
+      advanceBeat()
+      return
+    }
+
+    const player = this.getMetronomePlayer(sampleId)
+
+    if (!player) {
+      this.logMetronomeSampleLoadFailure(sampleId, METRONOME_SAMPLE_URLS[sampleId], {
+        phase: 'trigger',
+        reason: 'no idle player available',
+      })
+      this.triggerMetronomeFallbackClick(time, targetDb)
+      scheduleBeatVisual()
+      advanceBeat()
+      return
+    }
+
+    if (!player.loaded) {
+      this.logMetronomeSampleLoadFailure(sampleId, METRONOME_SAMPLE_URLS[sampleId], {
+        phase: 'trigger',
+        reason: 'player not loaded',
+        playerState: player.state,
+        bufferLoaded: Boolean(player.buffer),
+      })
+      this.triggerMetronomeFallbackClick(time, targetDb)
+      scheduleBeatVisual()
+      advanceBeat()
+      return
+    }
+
     player.volume.cancelScheduledValues(time)
     player.volume.setValueAtTime(targetDb + METRONOME_ATTACK_SOFTENING_DB, time)
     player.volume.linearRampToValueAtTime(targetDb, time + METRONOME_ATTACK_RAMP_SECONDS)
     player.start(time, 0)
-
-    if (this.onMetronomeBeat) {
-      const downbeat = isDownbeat
-      Tone.Draw.schedule(() => {
-        try {
-          this.onMetronomeBeat?.(downbeat)
-        } catch {
-          // A visual hook must never disrupt audio scheduling.
-        }
-      }, time)
-    }
-
-    this.metronomeMeasureBeatIndex += 1
-
-    if (this.metronomeMeasureBeatIndex >= beatsPerMeasure) {
-      this.advanceMetronomeMeasure()
-    }
+    scheduleBeatVisual()
+    advanceBeat()
   }
 
   advanceMetronomeBeatSilently() {

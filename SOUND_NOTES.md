@@ -737,7 +737,8 @@ Primary focus shifts from browser sound tuning to **wrapper and device behavior*
 - Verify drone + metronome balance on phone speakers (remaining open item)
 - Verify Tone.js / Web Audio starts reliably from Play tap inside the wrapper
 - Test iOS and Android: speaker, headphones, silent mode
-- Verify lifecycle handler on device: background/lock stops playback immediately, UI shows Ready, settings preserved, Play restarts normally (no auto-resume)
-- Confirm metronome scheduling stays stable over extended playback and after lifecycle stop/restart
+- **iOS:** playback continues through background and lock screen; foreground return resumes suspended Web Audio context when needed
+- **Android:** background/lock stops playback immediately; UI shows Ready; settings preserved; Play restarts normally
+- Confirm metronome scheduling stays stable over extended playback, during iOS background, and after Android lifecycle stop/restart
 - Confirm drone plays without glitches during normal app use
 - Regression-watch the solved items above if any audio or lifecycle code changes

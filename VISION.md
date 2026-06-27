@@ -53,9 +53,9 @@ The main screen has been refactored for app-store readiness:
 
 ## Completed: App Lifecycle Safety
 
-- On background, lock, or page hide: drone and metronome stop immediately; UI returns to Ready
-- User settings preserved; no auto-resume on foreground (user taps Play again)
-- No background audio in v1
+- **iOS (native):** drone and metronome continue during background and lock screen; foreground return resumes a suspended Web Audio context when playback was active
+- **Android and web:** on background, lock, or page hide, drone and metronome stop immediately; UI returns to Ready; user must tap Play again
+- User settings preserved across lifecycle events
 
 ## Current Phase: App-Store Readiness (Device Validation)
 

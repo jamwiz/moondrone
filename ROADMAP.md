@@ -97,14 +97,14 @@ Focused pass — no routing, limiter, or mix-architecture changes:
 
 ## Completed: App Lifecycle Safety
 
-Pre-device lifecycle audit and minimal safe handler:
+Pre-device lifecycle audit and platform-specific handler:
 
-- `droneEngine.stopForLifecycle()` — immediate stop on interruption (not the 2 s manual Stop fade)
-- `src/useAppLifecycle.js` — background handler from `App.jsx`
-- `@capacitor/app` for native `appStateChange`; `visibilitychange` + `pagehide` fallbacks
-- On background/lock: stop drone and metronome, sync UI to Ready, preserve settings
-- On foreground: no auto-resume — user taps Play again
-- No background audio in v1
+- `droneEngine.stopForLifecycle()` — immediate stop on interruption (Android/web; not iOS background)
+- `src/useAppLifecycle.js` — background handler from `App.jsx` (`ENABLE_IOS_BACKGROUND_AUDIO`)
+- `@capacitor/app` for native `appStateChange`
+- **iOS:** drone and metronome continue during background/lock screen; foreground attempts Web Audio context resume
+- **Android:** stop on inactive; sync UI to Ready; preserve settings; user taps Play again
+- **Web dev:** stop on tab hide / page hide (same as Android lifecycle stop)
 
 ## Completed: Per-Moon Balance Tuning (2026)
 

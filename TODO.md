@@ -81,11 +81,10 @@ Sound engine and premium UI layout are **complete** — do not change presets, r
 
 - [x] Pre-device audit of background/foreground and Web Audio suspension risks
 - [x] `droneEngine.stopForLifecycle()` — immediate drone/metronome stop (not the 2 s manual Stop fade)
-- [x] `src/useAppLifecycle.js` — background handler wired from `App.jsx`
-- [x] `@capacitor/app` — native `appStateChange` listener when inactive
-- [x] `visibilitychange` + `pagehide` fallbacks for WebView and browser dev
-- [x] On background: stop playback, sync UI to Ready, preserve key/register/preset/slider settings
-- [x] On foreground: no auto-resume — user must tap Play again
+- [x] `src/useAppLifecycle.js` — platform lifecycle handler wired from `App.jsx` (`ENABLE_IOS_BACKGROUND_AUDIO`)
+- [x] `@capacitor/app` — native `appStateChange` listener
+- [x] **iOS:** continue playback during background/lock screen; foreground Web Audio context resume when needed
+- [x] **Android/web:** stop on background; sync UI to Ready; preserve settings; user taps Play again
 
 ## Completed — Cleanup + iPhone Speaker Pass
 
@@ -130,10 +129,17 @@ Sound engine and premium UI layout are **complete** — do not change presets, r
 - [x] `.gitignore` for Vite + React + Capacitor (excludes `node_modules/`, `dist/`, build caches, env files, `.cursor/`)
 - [x] Baseline commit **`e4e01cb`** with tag **`stable-post-phone-revert`**
 
+## Dev Tooling
+
+- [ ] Dev output meter: run `npm run dev -- --host` or `npm run preview -- --host`, press Play, tap **Meter**, verify Peak/Hold/RMS/bars/spectrum
+- [ ] Loudness calibration: use **Dev output gain** slider to find target Peak Hold (−3 to −1 dB), note Prod trim + Dev gain = Effective, then apply offset to `finalOutputTrimDb` in `toneLab.js` manually
+- [ ] Confirm production build (`npm run build` + `npm run preview`) does **not** show the Meter control or dev gain
+
 ## App-Store Readiness (Active)
 
 - [ ] Review safe areas and current one-screen moon layout on small phones in Capacitor WebView
 - [ ] Ensure visual consistency in Capacitor WebView (iOS and Android)
+- [ ] After `npm run build`, confirm required web assets are present in `dist/` (see `CAPACITOR.md` — iOS packaging checklist)
 - [ ] Verify native icon and splash on real devices after clean native rebuild
 
 ## Capacitor / Device Validation (Parallel)
@@ -141,8 +147,9 @@ Sound engine and premium UI layout are **complete** — do not change presets, r
 - [x] Capacitor setup (`android/`, `ios/`, npm scripts)
 - [ ] Verify Tone.js / Web Audio startup on first Play tap inside wrapper
 - [ ] Verify iOS and Android audio behavior (speaker, headphones, silent mode)
-- [ ] Verify lifecycle handler on device: background/lock stops cleanly, return shows Ready, Play restarts normally
-- [ ] Confirm metronome scheduling stable in wrapper (including after lifecycle stop/restart)
+- [ ] Verify **iOS** lifecycle: playback continues through background and lock screen; foreground return resumes suspended Web Audio context; no stuck/silent audio
+- [ ] Verify **Android** lifecycle: background/lock stops cleanly, return shows Ready, Play restarts normally
+- [ ] Confirm metronome scheduling stable in wrapper (including iOS background and Android lifecycle stop/restart)
 - [ ] Decide distribution target: TestFlight / internal vs. public App Store
 
 ## Audio Validation (Listening Tests)

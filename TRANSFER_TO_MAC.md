@@ -87,15 +87,15 @@ If Xcode reports a provisioning error, sign in under **Xcode → Settings → Ac
 | Capacitor wrapper | Configured (Capacitor 8) |
 | Native branding | Generated — iOS icon + splash in `Assets.xcassets` |
 | Android splash | Dark `#090807` + transparent icon (Android-only) |
-| App lifecycle safety | Implemented — stop on background/lock, Ready on return, no auto-resume |
-| **Remaining work** | **iOS device validation** — audio startup, lifecycle verification, silent mode, speaker/headphones |
+| App lifecycle | **iOS:** background/lock-screen playback + foreground context resume. **Android:** stop on background, Ready on return |
+| **Remaining work** | **iOS device validation** — background/lock-screen playback, context resume, silent mode, speaker/headphones |
 
 Primary validation goals on iPhone:
 
 - Tone.js / Web Audio starts on first **Play** tap inside the Capacitor WebView
 - Drone + metronome balance on phone speakers
-- Background/lock stops playback cleanly; return shows Ready; Play restarts normally
-- Metronome scheduling over extended playback and after lifecycle stop/restart
+- **Background and lock screen:** playback continues; foreground return has no stuck/silent audio
+- Metronome scheduling over extended playback and during iOS background
 
 See `TODO.md` for the full checklist.
 

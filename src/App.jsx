@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { Suspense, lazy, useEffect, useRef, useState } from 'react'
 import {
   DEFAULT_REFERENCE_A_HZ,
   MAX_MASTER_VOLUME_NORMALIZED,
@@ -21,6 +21,10 @@ import { useAppLifecycle } from './useAppLifecycle'
 import { getMoonStageVisualStyle } from './moonVisuals'
 import { getMoonArtworkSrc } from './moonArtwork'
 import './App.css'
+
+const DevOutputMeter = import.meta.env.DEV
+  ? lazy(() => import('./DevOutputMeter.jsx').then((module) => ({ default: module.DevOutputMeter })))
+  : null
 
 // Circle of Fifths order — the 12 chromatic keys arranged so each step is a
 // perfect fifth. `value` matches the engine key names; `primary`/`secondary`
@@ -678,6 +682,12 @@ function App() {
           onClose={() => setInfoScreen(null)}
           onScreenChange={setInfoScreen}
         />
+      ) : null}
+
+      {DevOutputMeter ? (
+        <Suspense fallback={null}>
+          <DevOutputMeter />
+        </Suspense>
       ) : null}
     </main>
   )
