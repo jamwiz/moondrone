@@ -6792,8 +6792,14 @@ export class DroneEngine {
     const deClick = STRINGS_HIGH_REGISTER_TRANSITION_DECLICK
     const silenceThreshold = deClick.disposeSilenceThreshold
     const gainParam = voice.gain.gain
-    const currentGain = Math.max(gainParam.value, 0)
-    const useDeClickPath = this.isStringsVoice(voice) && currentGain > silenceThreshold
+    const isStringsVoice = this.isStringsVoice(voice)
+    // Outgoing Strings fades are scheduled; param.value can lag on WebKit. Read the
+    // true instantaneous level before preStop/stop (same idea as rampOutgoingVoiceGain).
+    const accurateGain = isStringsVoice && typeof gainParam.getValueAtTime === 'function'
+      ? gainParam.getValueAtTime(now)
+      : null
+    const currentGain = Math.max(accurateGain != null ? accurateGain : gainParam.value, 0)
+    const useDeClickPath = isStringsVoice && currentGain > silenceThreshold
     let stopTime = now + deClick.stopDelaySeconds
 
     if (this.presetTransitionDebugContext) {
@@ -9462,9 +9468,10 @@ export class DroneEngine {
 
     const tonalAmount = this.getMoonTransitionVoicePlanningTonalAmount()
     const breathCyclePosition = this.getMoonTransitionVoicePlanningBreathCyclePosition()
-    const noteEntryBreathPhase = presetChange
-      ? breathCyclePosition
-      : this.resolveMoonTransitionAirBreathCyclePosition(breathCyclePosition)
+    // Voice entry must match the live breath phase so incoming targets align with
+    // outgoing fade levels. Air-only neutralization stays in the breath snapshot
+    // (airBreathCyclePosition) for reanchor/deferred-air paths.
+    const noteEntryBreathPhase = breathCyclePosition
     const noteEntryTonalAmount = this.getEffectiveTonalAmountAtCyclePosition(noteEntryBreathPhase)
 
     if (!presetChange) {

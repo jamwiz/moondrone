@@ -257,12 +257,12 @@ export const TONE_LAB_TUNING = {
     // Compressor strength macro. 1 = current MASTER_TUNING glue level.
     // Range: 0–1.5. Lower = gentler/less squash; higher = more glue (watch pumping).
     // Maps to threshold, ratio, and makeup — not a blind crush.
-    compressorAmount: 1.5,
+    compressorAmount: 1.25,
 
     // Final post-limiter output trim. Use mainly for attenuation after mastering.
     // Positive values can exceed the limiter ceiling and may clip device output.
     // Calibrated 2026 via dev output meter (+3 dB vs prior 0 dB default).
-    finalOutputTrimDb: 21,
+    finalOutputTrimDb: 20,
   },
 }
 
