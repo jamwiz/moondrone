@@ -20,6 +20,7 @@ import { InfoModal } from './InfoModal'
 import { useAppLifecycle } from './useAppLifecycle'
 import { getMoonStageVisualStyle } from './moonVisuals'
 import { getMoonArtworkSrc } from './moonArtwork'
+import { audioDiag } from './audioDiagnostics'
 import './App.css'
 
 const DevOutputMeter = import.meta.env.DEV
@@ -132,6 +133,30 @@ function App() {
   const isStartingRef = useRef(false)
 
   useAppLifecycle(setIsPlaying, setIsMetronomePlaying, isPlaying, isMetronomePlaying)
+
+  // iOS audio interruptions (phone call, another app taking audio focus, Siri) leave the
+  // Web Audio context "interrupted". The engine detects that and cleanly resets itself; here
+  // we sync the UI so it never shows Drone Active / metronome running while actually silent.
+  useEffect(() => {
+    droneEngine.onPlaybackInterrupted = ({ wasPlaying, wasMetronomePlaying }) => {
+      audioDiag('interruption', 'playback interrupted by iOS — resetting UI', {
+        wasPlaying,
+        wasMetronomePlaying,
+      })
+
+      if (wasPlaying) {
+        setIsPlaying(false)
+      }
+
+      if (wasMetronomePlaying) {
+        setIsMetronomePlaying(false)
+      }
+    }
+
+    return () => {
+      droneEngine.onPlaybackInterrupted = null
+    }
+  }, [])
 
   // One moon pulse per actual metronome beat (synced to the audio clock via the
   // engine's visual-only onMetronomeBeat hook). No continuous animation.
@@ -308,6 +333,11 @@ function App() {
   }
 
   async function handleMetronomePlay() {
+    audioDiag('metronome', 'handleMetronomePlay invoked', {
+      alreadyPlaying: isMetronomePlaying,
+      contextState: droneEngine.getContextState?.() ?? 'unknown',
+    })
+
     if (isMetronomePlaying) {
       return
     }
@@ -319,9 +349,12 @@ function App() {
       droneEngine.setMetronomeSoundMode(metronomeSoundMode)
       droneEngine.setMetronomeMeter(metronomeMeter)
       await droneEngine.startMetronome(metronomeBpm)
+      audioDiag('metronome', 'startMetronome resolved — now playing', {
+        contextState: droneEngine.getContextState?.() ?? 'unknown',
+      })
       setIsMetronomePlaying(true)
     } catch (error) {
-      console.error('Metronome start failed', error)
+      console.error('[Moondrone metronome] start failed', error)
       setIsMetronomePlaying(false)
     }
   }

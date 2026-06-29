@@ -1,4 +1,5 @@
 import * as Tone from 'tone'
+import { audioDiag } from './audioDiagnostics'
 import {
   DEFAULT_METRONOME_METER,
   DEFAULT_METRONOME_SOUND_MODE,
@@ -365,6 +366,11 @@ export class DroneEngine {
     // Optional visual-only hook, invoked via Tone.Draw (synced to the audio
     // clock) on each audible beat so the UI can pulse. Never affects audio.
     this.onMetronomeBeat = null
+    // Optional hook fired when iOS interrupts audio (call / other app / Siri) and the
+    // Web Audio context enters "interrupted". The UI uses it to clear playing state so it
+    // never pretends to be playing while silent. Set by App; never affects audio scheduling.
+    this.onPlaybackInterrupted = null
+    this.contextStateWatcherAttached = false
     this.nextMetronomeBeatTime = 0
     this.metronomePlayerPools = null
     this.metronomeTrim = null
@@ -486,6 +492,7 @@ export class DroneEngine {
       // Browsers require Tone.start() to run from the Play button gesture before nodes are created.
       await Tone.start()
       await this.resumeContextIfNeeded()
+      this.ensureContextStateWatcher()
 
       if (!this.isStarting) {
         return
@@ -8724,6 +8731,61 @@ export class DroneEngine {
     return Tone.getContext().rawContext.state
   }
 
+  // Attach once. Watches the raw AudioContext for the iOS-only "interrupted" state
+  // (phone call, another app taking audio focus, Siri). On a genuine interruption we
+  // reset playback cleanly and notify the UI — we do NOT auto-resume or fight for focus.
+  // Normal lock-screen backgrounding keeps the context "running" (UIBackgroundModes audio),
+  // and ordinary "suspended" transitions are left to the existing lifecycle-resume path.
+  ensureContextStateWatcher() {
+    if (this.contextStateWatcherAttached) {
+      return
+    }
+
+    const rawContext = Tone.getContext().rawContext
+
+    if (!rawContext || typeof rawContext.addEventListener !== 'function') {
+      return
+    }
+
+    rawContext.addEventListener('statechange', () => {
+      this.handleContextStateChange(rawContext.state)
+    })
+
+    this.contextStateWatcherAttached = true
+  }
+
+  handleContextStateChange(state) {
+    // 'interrupted' is a non-standard WebKit/iOS state that fires only when the OS pulls
+    // audio focus. That is exactly the case where the UI must stop showing playback.
+    if (state !== 'interrupted') {
+      return
+    }
+
+    const wasPlaying = this.isPlaying
+    const wasMetronomePlaying = this.metronomePlaying
+
+    if (!wasPlaying && !wasMetronomePlaying) {
+      return
+    }
+
+    console.warn('[Moondrone audio-interruption] AudioContext interrupted by iOS — stopping cleanly', {
+      wasPlaying,
+      wasMetronomePlaying,
+    })
+
+    // Reuse the existing immediate-stop path (gains to 0, timers cleared) so nothing
+    // resumes silently. Does not change steady-state sound design or transitions.
+    this.stopForLifecycle()
+
+    if (this.onPlaybackInterrupted) {
+      try {
+        this.onPlaybackInterrupted({ wasPlaying, wasMetronomePlaying })
+      } catch {
+        // A UI hook failure must never break audio teardown.
+      }
+    }
+  }
+
   // Lifecycle-only AudioContext wake — does not start playback, rebuild voices, or retune.
   // Returns diagnostic fields for iOS background-audio lifecycle resume logging.
   async resumeAudioContextForLifecycle() {
@@ -11052,8 +11114,11 @@ export class DroneEngine {
   }
 
   async startMetronome(bpm = this.metronomeBpm) {
+    audioDiag('metronome-engine', 'startMetronome begin', { contextState: this.getContextState() })
     await Tone.start()
     await this.resumeContextIfNeeded()
+    this.ensureContextStateWatcher()
+    audioDiag('metronome-engine', 'context ready', { contextState: this.getContextState() })
     this.metronomeBpm = this.clamp(bpm, MIN_METRONOME_BPM, MAX_METRONOME_BPM)
 
     if (this.metronomePlaying) {
@@ -11061,6 +11126,9 @@ export class DroneEngine {
     }
 
     await this.ensureMetronomeChain()
+    audioDiag('metronome-engine', 'metronome chain ready', {
+      usesSampleFallback: this.metronomeUsesSampleFallback === true,
+    })
     this.metronomeActiveMeter = this.metronomeMeter
     this.metronomePendingMeter = null
     this.metronomeMeasureBeatIndex = 0

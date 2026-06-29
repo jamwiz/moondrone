@@ -9,20 +9,84 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         configureAudioSessionForPlayback()
+        registerAudioSessionObservers()
         return true
     }
 
     /// `.playback` with an active session is required so Moondrone stays audible when the
     /// Ring/Silent switch is ON and continues on the lock screen (with `UIBackgroundModes: audio`).
     /// Does not start playback — WebAudio/Tone.js still waits for the user to tap Play.
-    private func configureAudioSessionForPlayback() {
+    ///
+    /// No `.mixWithOthers` option: Moondrone takes the active audio focus so iOS delivers
+    /// proper interruption notifications (calls, other apps, Siri). Mixing would suppress them.
+    private func configureAudioSessionForPlayback(_ reason: String = "launch") {
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default, options: [])
             try session.setActive(true)
+            logAudioSessionState(reason)
         } catch {
-            print("Failed to configure AVAudioSession:", error)
+            print("[Moondrone audio-session] Failed to configure AVAudioSession (\(reason)):", error)
         }
+    }
+
+    /// Logs the live category / mode / active intent so Silent Mode behaviour can be verified
+    /// from device logs. `.playback` here is what makes audio ignore the Ring/Silent switch.
+    private func logAudioSessionState(_ reason: String) {
+        let session = AVAudioSession.sharedInstance()
+        print("[Moondrone audio-session] state (\(reason)):",
+              "category=\(session.category.rawValue)",
+              "mode=\(session.mode.rawValue)",
+              "options=\(session.categoryOptions.rawValue)",
+              "sampleRate=\(session.sampleRate)",
+              "outputVolume=\(session.outputVolume)")
+    }
+
+    /// WKWebView / Capacitor can reset the shared audio session to a Silent-Mode-respecting
+    /// category when WebAudio first starts, and iOS resets it after a media-services crash.
+    /// Re-assert `.playback` on those events and after interruptions so we never silently
+    /// fall back to `ambient`/`soloAmbient`.
+    private func registerAudioSessionObservers() {
+        let center = NotificationCenter.default
+
+        center.addObserver(self,
+                           selector: #selector(handleAudioSessionInterruption(_:)),
+                           name: AVAudioSession.interruptionNotification,
+                           object: nil)
+
+        center.addObserver(self,
+                           selector: #selector(handleMediaServicesReset),
+                           name: AVAudioSession.mediaServicesWereResetNotification,
+                           object: nil)
+    }
+
+    @objc private func handleAudioSessionInterruption(_ notification: Notification) {
+        guard let info = notification.userInfo,
+              let rawType = info[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: rawType) else {
+            return
+        }
+
+        switch type {
+        case .began:
+            // iOS has paused our audio (call/other app/Siri). The web layer detects the matching
+            // AudioContext "interrupted" state and resets the UI; we do not fight for focus here.
+            print("[Moondrone audio-session] interruption began")
+        case .ended:
+            // Re-activate so a subsequent Play works; honour the system's resume hint.
+            let options = (info[AVAudioSessionInterruptionOptionKey] as? UInt).map(AVAudioSession.InterruptionOptions.init(rawValue:))
+            let shouldResume = options?.contains(.shouldResume) ?? false
+            print("[Moondrone audio-session] interruption ended shouldResume=\(shouldResume)")
+            configureAudioSessionForPlayback("interruption-ended")
+        @unknown default:
+            break
+        }
+    }
+
+    @objc private func handleMediaServicesReset() {
+        // The media server restarted; all audio objects are invalid until the session is rebuilt.
+        print("[Moondrone audio-session] media services were reset — reconfiguring")
+        configureAudioSessionForPlayback("media-services-reset")
     }
 
     func applicationWillResignActive(_ application: UIApplication) {
@@ -40,7 +104,9 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     func applicationDidBecomeActive(_ application: UIApplication) {
-        // Restart any tasks that were paused (or not yet started) while the application was inactive. If the application was previously in the background, optionally refresh the user interface.
+        // WKWebView may have reset the shared session while we were inactive; re-assert `.playback`
+        // so Silent Mode stays overridden and lock-screen/background audio keeps working.
+        configureAudioSessionForPlayback("did-become-active")
     }
 
     func applicationWillTerminate(_ application: UIApplication) {

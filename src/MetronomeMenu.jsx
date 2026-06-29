@@ -3,6 +3,7 @@ import {
   METRONOME_METER_OPTIONS,
   METRONOME_SOUND_MODES,
 } from './metronomeSamples'
+import { audioDiag } from './audioDiagnostics'
 
 export function MetronomeMenu({
   bpm,
@@ -135,7 +136,19 @@ export function MetronomeMenu({
           <button
             type="button"
             className={isPlaying ? 'pill-button inactive' : 'pill-button active'}
-            onClick={isPlaying ? onStop : onPlay}
+            // touch-action: manipulation removes the iOS double-tap delay and keeps the
+            // tap from being swallowed as a gesture inside the WKWebView popover.
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={() => audioDiag('metronome-tap', 'pointerdown', { isPlaying })}
+            onTouchStart={() => audioDiag('metronome-tap', 'touchstart', { isPlaying })}
+            onClick={() => {
+              audioDiag('metronome-tap', 'click', { isPlaying })
+              if (isPlaying) {
+                onStop()
+              } else {
+                onPlay()
+              }
+            }}
             aria-label={isPlaying ? 'Stop metronome' : 'Start metronome'}
           >
             {isPlaying ? 'Stop' : 'Play'}
