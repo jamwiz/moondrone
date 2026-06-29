@@ -12,6 +12,7 @@
 //   - Keep playing while drone OR metronome audio is active; pause only when all audio stops.
 import { Capacitor } from '@capacitor/core'
 import { audioDiag } from './audioDiagnostics'
+import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
 
 let audioEl = null
 let primerSrc = null
@@ -163,7 +164,13 @@ export async function ensurePrimerPlaying(reason = 'play') {
 }
 
 // Pause the primer. Call only when the user has stopped all Moondrone audio (idle).
-export function pausePrimer(reason = 'idle') {
+// During media-primer startup, pauses are skipped unless force=true.
+export function pausePrimer(reason = 'idle', { force = false } = {}) {
+  if (!force && isMediaPrimerStartupActive()) {
+    audioDiag('media-primer', `primer kept alive during startup (pause skipped: ${reason})`)
+    return
+  }
+
   if (!audioEl) {
     return
   }

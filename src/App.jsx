@@ -23,6 +23,11 @@ import { getMoonArtworkSrc } from './moonArtwork'
 import { audioDiag } from './audioDiagnostics'
 import { addNativeAudioSessionListeners, configureNativePlaybackSession } from './nativeAudioSession'
 import { ensurePrimerPlaying, getPrimerDebugState, pausePrimer } from './iosMediaPrimer'
+import {
+  beginMediaPrimerStartup,
+  endMediaPrimerStartup,
+  isMediaPrimerStartupActive,
+} from './mediaPrimerStartupGuard'
 import { AudioDebugPanel } from './AudioDebugPanel'
 import './App.css'
 
@@ -142,6 +147,14 @@ function App() {
   // we sync the UI so it never shows Drone Active / metronome running while actually silent.
   useEffect(() => {
     droneEngine.onPlaybackInterrupted = ({ wasPlaying, wasMetronomePlaying }) => {
+      if (isMediaPrimerStartupActive()) {
+        audioDiag('startup-guard', 'UI reset deferred during startup guard', {
+          wasPlaying,
+          wasMetronomePlaying,
+        })
+        return
+      }
+
       audioDiag('interruption', 'playback interrupted by iOS — resetting UI', {
         wasPlaying,
         wasMetronomePlaying,
@@ -156,9 +169,7 @@ function App() {
         setIsMetronomePlaying(false)
       }
 
-      // Interruption resets all audio → we are now idle, so stop the primer too (do not leave it
-      // running when idle). This does NOT change interruption policy; it only stops the primer.
-      pausePrimer('interruption-reset')
+      pausePrimer('interruption-reset', { force: true })
     }
 
     return () => {
@@ -232,6 +243,30 @@ function App() {
   // then (b) start the hidden HTMLAudioElement primer. Tone.start() + WebAudio happen next inside
   // droneEngine.start()/startMetronome(), which also re-assert native .playback afterwards (step e).
   // No-op on web/Android.
+  async function ensureContextRunningAfterStart(label) {
+    if (droneEngine.getContextState?.() === 'running') {
+      return true
+    }
+
+    await droneEngine.attemptContextInterruptRecovery(label)
+
+    if (droneEngine.getContextState?.() === 'running') {
+      return true
+    }
+
+    // Primer handoff debounce may still be in flight — wait once then retry recovery.
+    await new Promise((resolve) => {
+      window.setTimeout(resolve, 1100)
+    })
+
+    if (droneEngine.getContextState?.() === 'running') {
+      return true
+    }
+
+    await droneEngine.attemptContextInterruptRecovery(`${label}-retry`)
+    return droneEngine.getContextState?.() === 'running'
+  }
+
   async function primeForPlayback(reason) {
     audioDiag('media-primer', `primeForPlayback BEGIN (${reason})`)
     await configureNativePlaybackSession('media-primer-before')
@@ -245,16 +280,27 @@ function App() {
     }
 
     isStartingRef.current = true
+    beginMediaPrimerStartup('drone-play')
 
     try {
+      audioDiag('drone', 'handlePlay ENTER')
       await primeForPlayback('drone-play')
       applyBinauralBeatToEngine()
       await droneEngine.start(selectedKey, toEngineVolume(volume), selectedOctave, intensity, breath, FIXED_REVERB_PERCENT)
+
+      const contextOk = await ensureContextRunningAfterStart('drone-play')
+      if (!contextOk) {
+        throw new Error('AudioContext not running after drone start')
+      }
+
       setIsPlaying(true)
-    } catch {
+      endMediaPrimerStartup('drone-play-success')
+    } catch (error) {
+      audioDiag('drone', 'handlePlay failed', { message: error?.message ?? String(error) })
       setIsPlaying(false)
+      endMediaPrimerStartup('drone-play-failed', { immediate: true })
       if (!isMetronomePlaying) {
-        pausePrimer('drone-play-failed')
+        pausePrimer('drone-play-failed', { force: true })
       }
     } finally {
       isStartingRef.current = false
@@ -291,16 +337,26 @@ function App() {
     }
 
     isStartingRef.current = true
+    beginMediaPrimerStartup('drone-key-change-start')
 
     try {
       await primeForPlayback('drone-key-change-start')
       applyBinauralBeatToEngine()
       await droneEngine.start(key, toEngineVolume(volume), selectedOctave, intensity, breath, FIXED_REVERB_PERCENT)
+
+      const contextOk = await ensureContextRunningAfterStart('drone-key-change-start')
+      if (!contextOk) {
+        throw new Error('AudioContext not running after drone start')
+      }
+
       setIsPlaying(true)
-    } catch {
+      endMediaPrimerStartup('drone-key-change-start-success')
+    } catch (error) {
+      audioDiag('drone', 'handleKeyChange start failed', { message: error?.message ?? String(error) })
       setIsPlaying(false)
+      endMediaPrimerStartup('drone-key-change-failed', { immediate: true })
       if (!isMetronomePlaying) {
-        pausePrimer('drone-key-change-failed')
+        pausePrimer('drone-key-change-failed', { force: true })
       }
     } finally {
       isStartingRef.current = false
@@ -392,18 +448,26 @@ function App() {
     }
 
     setMetronomePulse({ tick: 0, downbeat: false })
+    beginMediaPrimerStartup('metronome-play')
 
     try {
       await primeForPlayback('metronome-play')
       droneEngine.setMetronomeSoundMode(metronomeSoundMode)
       droneEngine.setMetronomeMeter(metronomeMeter)
       await droneEngine.startMetronome(metronomeBpm)
+
+      const contextOk = await ensureContextRunningAfterStart('metronome-play')
+      if (!contextOk) {
+        throw new Error('AudioContext not running after metronome start')
+      }
+
       audioDiag('metronome', 'startMetronome resolved — setting UI isMetronomePlaying=true', {
         uiIsMetronomePlayingBefore: isMetronomePlaying,
         engineMetronomePlaying: droneEngine.getMetronomeDiagnostics?.()?.metronomePlaying,
         contextState: droneEngine.getContextState?.() ?? 'unknown',
       })
       setIsMetronomePlaying(true)
+      endMediaPrimerStartup('metronome-play-success')
       audioDiag('metronome', 'handleMetronomePlay complete — UI AFTER setState(true) requested', {
         note: 'React state updates on next render; panel shows live uiIsMetronomePlaying',
       })
@@ -414,8 +478,9 @@ function App() {
       })
       console.error('[Moondrone metronome] start failed', error)
       setIsMetronomePlaying(false)
+      endMediaPrimerStartup('metronome-play-failed', { immediate: true })
       if (!isPlaying) {
-        pausePrimer('metronome-play-failed')
+        pausePrimer('metronome-play-failed', { force: true })
       }
     }
   }

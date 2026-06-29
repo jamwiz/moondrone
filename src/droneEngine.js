@@ -1,6 +1,8 @@
 import * as Tone from 'tone'
 import { audioDiag } from './audioDiagnostics'
 import { configureNativePlaybackSession } from './nativeAudioSession'
+import { isPrimerPlaying } from './iosMediaPrimer'
+import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
 import {
   DEFAULT_METRONOME_METER,
   DEFAULT_METRONOME_SOUND_MODE,
@@ -373,6 +375,8 @@ export class DroneEngine {
     // never pretends to be playing while silent. Set by App; never affects audio scheduling.
     this.onPlaybackInterrupted = null
     this.contextStateWatcherAttached = false
+    this.contextInterruptDebounceTimer = null
+    this.contextInterruptRecoveryInFlight = false
     this.nextMetronomeBeatTime = 0
     this.metronomePlayerPools = null
     this.metronomeTrim = null
@@ -8783,19 +8787,138 @@ export class DroneEngine {
   }
 
   handleContextStateChange(state) {
-    // 'interrupted' is a non-standard WebKit/iOS state that fires only when the OS pulls
-    // audio focus. That is exactly the case where the UI must stop showing playback.
     if (state !== 'interrupted') {
+      return
+    }
+
+    if (this.shouldDeferContextInterruptHandling()) {
+      this.scheduleContextInterruptRecovery('context-interrupted')
       return
     }
 
     this.handleNativeAudioInterruption('context-interrupted')
   }
 
+  shouldDeferContextInterruptHandling() {
+    if (isMediaPrimerStartupActive()) {
+      return true
+    }
+
+    // Primer actively playing while app is visible — likely the expected handoff, not a call/Siri.
+    try {
+      return isPrimerPlaying() && typeof document !== 'undefined' && !document.hidden
+    } catch {
+      return false
+    }
+  }
+
+  scheduleContextInterruptRecovery(reason) {
+    audioDiag('startup-guard', 'context-interrupted debounce begin', {
+      reason,
+      contextState: this.getContextState(),
+      startupGuardActive: isMediaPrimerStartupActive(),
+    })
+
+    if (this.contextInterruptDebounceTimer) {
+      window.clearTimeout(this.contextInterruptDebounceTimer)
+    }
+
+    this.contextInterruptDebounceTimer = window.setTimeout(() => {
+      this.contextInterruptDebounceTimer = null
+      void this.attemptContextInterruptRecovery(reason)
+    }, 1000)
+  }
+
+  async attemptContextInterruptRecovery(reason = 'context-interrupted') {
+    if (this.contextInterruptRecoveryInFlight) {
+      return false
+    }
+
+    this.contextInterruptRecoveryInFlight = true
+
+    try {
+      const stateBefore = this.getContextState()
+
+      if (stateBefore === 'running') {
+        audioDiag('startup-guard', 'context-interrupted recovered (already running)', { reason })
+        return true
+      }
+
+      if (isMediaPrimerStartupActive()) {
+        audioDiag('startup-guard', 'primer kept alive during startup — attempting recovery', {
+          reason,
+          stateBefore,
+        })
+      }
+
+      await this.resumeContextIfNeeded()
+      await configureNativePlaybackSession('context-recovery')
+
+      const stateAfter = this.getContextState()
+
+      if (stateAfter === 'running') {
+        audioDiag('startup-guard', 'context-interrupted recovered', { reason, stateAfter })
+        return true
+      }
+
+      if (isMediaPrimerStartupActive()) {
+        audioDiag('startup-guard', 'context still interrupted during startup guard — deferring hard reset', {
+          reason,
+          stateAfter,
+        })
+        return false
+      }
+
+      audioDiag('startup-guard', 'context-interrupted hard reset after failed recovery', {
+        reason,
+        stateAfter,
+      })
+      this.handleNativeAudioInterruptionConfirmed(reason)
+      return false
+    } finally {
+      this.contextInterruptRecoveryInFlight = false
+    }
+  }
+
+  isDeferredStartupInterruption(reason) {
+    if (!isMediaPrimerStartupActive()) {
+      return false
+    }
+
+    return reason === 'interruption-began'
+      || reason === 'context-interrupted'
+      || reason === 'native'
+  }
+
   // Single entry point for "iOS took our audio focus" — reached from the AudioContext
   // 'interrupted' state watcher AND from the native AVAudioSession interruption plugin.
-  // Hard-resets the graph so the next Play rebuilds from silence (no pop), then tells the UI.
   handleNativeAudioInterruption(reason = 'native') {
+    if (reason === 'media-services-reset') {
+      this.handleNativeAudioInterruptionConfirmed(reason)
+      return
+    }
+
+    if (this.isDeferredStartupInterruption(reason)) {
+      audioDiag('startup-guard', 'interruption ignored/deferred during media-primer startup', { reason })
+      this.scheduleContextInterruptRecovery(reason)
+      return
+    }
+
+    if (this.shouldDeferContextInterruptHandling() && (reason === 'interruption-began' || reason === 'context-interrupted')) {
+      audioDiag('startup-guard', 'interruption deferred (primer handoff)', { reason })
+      this.scheduleContextInterruptRecovery(reason)
+      return
+    }
+
+    this.handleNativeAudioInterruptionConfirmed(reason)
+  }
+
+  handleNativeAudioInterruptionConfirmed(reason = 'native') {
+    if (isMediaPrimerStartupActive()) {
+      audioDiag('startup-guard', 'hard reset blocked during startup guard', { reason })
+      return
+    }
+
     const wasPlaying = this.isPlaying
     const wasMetronomePlaying = this.metronomePlaying
 
