@@ -1,7 +1,7 @@
 import * as Tone from 'tone'
 import { audioDiag } from './audioDiagnostics'
 import { configureNativePlaybackSession } from './nativeAudioSession'
-import { getPrimerDebugState } from './iosMediaPrimer'
+import { ensurePrimerPlaying, getPrimerDebugState, isIosNative, isPrimerPlaying } from './iosMediaPrimer'
 import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
 import {
   DEFAULT_METRONOME_METER,
@@ -367,6 +367,8 @@ export class DroneEngine {
     this.metronomePlaying = false
     this.metronomeTimer = null
     this.metronomeUsesInterval = false
+    this.metronomeStartOperationToken = null
+    this.metronomePrimerWatchdogTimer = null
     // Optional visual-only hook, invoked via Tone.Draw (synced to the audio
     // clock) on each audible beat so the UI can pulse. Never affects audio.
     this.onMetronomeBeat = null
@@ -8755,6 +8757,7 @@ export class DroneEngine {
     return {
       metronomePlaying: this.metronomePlaying === true,
       schedulerActive: Boolean(this.metronomeTimer),
+      primerPlaying: isPrimerPlaying(),
       contextState: this.getContextState(),
       metronomeChainReady: this.metronomeChainReady == null ? 'null' : typeof this.metronomeChainReady,
       metronomeChainReadyTruthy: !!this.metronomeChainReady,
@@ -11422,6 +11425,144 @@ export class DroneEngine {
     this.metronomeUsesInterval = false
   }
 
+  clearMetronomePrimerWatchdog() {
+    if (this.metronomePrimerWatchdogTimer) {
+      window.clearTimeout(this.metronomePrimerWatchdogTimer)
+      this.metronomePrimerWatchdogTimer = null
+    }
+  }
+
+  assertMetronomeOperationCurrent(phase, operationToken) {
+    if (operationToken == null) {
+      return true
+    }
+
+    if (operationToken !== this.metronomeStartOperationToken) {
+      audioDiag('metronome-engine', 'stale metronome operation ignored', {
+        phase,
+        operationToken,
+        current: this.metronomeStartOperationToken,
+      })
+      return false
+    }
+
+    return true
+  }
+
+  async ensurePrimerPlayingForMetronomeScheduler(operationToken) {
+    if (!isIosNative()) {
+      return { ok: true, stale: false, contextState: this.getContextState(), primerPlaying: false }
+    }
+
+    const snapshot = () => ({
+      contextState: this.getContextState(),
+      primer: getPrimerDebugState(),
+      primerPlaying: isPrimerPlaying(),
+    })
+
+    audioDiag('metronome-engine', 'metronome pre-scheduler primer check', snapshot())
+
+    if (!this.assertMetronomeOperationCurrent('pre-scheduler-primer-check', operationToken)) {
+      return { ok: false, stale: true }
+    }
+
+    if (isPrimerPlaying() && this.getContextState() === 'running') {
+      audioDiag('metronome-engine', 'metronome scheduler start with primer playing', snapshot())
+      return { ok: true, stale: false, ...snapshot() }
+    }
+
+    audioDiag('metronome-engine', 'metronome pre-scheduler primer restarted', snapshot())
+    await ensurePrimerPlaying('metronome-pre-scheduler')
+
+    if (!this.assertMetronomeOperationCurrent('post-primer-restart', operationToken)) {
+      return { ok: false, stale: true }
+    }
+
+    if (this.getContextState() !== 'running') {
+      await this.ensureContextRunningForMetronomeScheduler('metronome-post-primer-restart')
+    }
+
+    const after = snapshot()
+    audioDiag('metronome-engine', 'metronome pre-scheduler primer check (after restart)', after)
+
+    if (!this.assertMetronomeOperationCurrent('post-primer-recheck', operationToken)) {
+      return { ok: false, stale: true }
+    }
+
+    if (!isPrimerPlaying() || after.contextState !== 'running') {
+      audioDiag('metronome-engine', 'metronome pre-scheduler primer failed', after)
+      return { ok: false, stale: false, ...after }
+    }
+
+    audioDiag('metronome-engine', 'metronome scheduler start with primer playing', after)
+    return { ok: true, stale: false, ...after }
+  }
+
+  scheduleMetronomePrimerWatchdog(operationToken) {
+    this.clearMetronomePrimerWatchdog()
+
+    this.metronomePrimerWatchdogTimer = window.setTimeout(() => {
+      this.metronomePrimerWatchdogTimer = null
+      void this.runMetronomePrimerWatchdog(operationToken)
+    }, 750)
+  }
+
+  async runMetronomePrimerWatchdog(operationToken) {
+    if (!isIosNative()) {
+      return
+    }
+
+    if (!this.assertMetronomeOperationCurrent('primer-watchdog', operationToken)) {
+      return
+    }
+
+    if (!this.metronomePlaying || !this.metronomeTimer) {
+      return
+    }
+
+    if (isPrimerPlaying()) {
+      audioDiag('metronome-engine', 'metronome primer watchdog: primer alive', {
+        contextState: this.getContextState(),
+        primer: getPrimerDebugState(),
+      })
+      return
+    }
+
+    audioDiag('metronome-engine', 'metronome primer watchdog: primer paused, restarting', {
+      contextState: this.getContextState(),
+      primer: getPrimerDebugState(),
+    })
+
+    await ensurePrimerPlaying('metronome-primer-watchdog')
+
+    if (!this.assertMetronomeOperationCurrent('primer-watchdog-post-restart', operationToken)) {
+      return
+    }
+
+    if (this.getContextState() !== 'running') {
+      await this.ensureContextRunningForMetronomeScheduler('metronome-primer-watchdog-recovery')
+    }
+
+    if (!this.assertMetronomeOperationCurrent('primer-watchdog-post-recovery', operationToken)) {
+      return
+    }
+
+    if (isPrimerPlaying() && this.getContextState() === 'running' && this.metronomeTimer) {
+      audioDiag('metronome-engine', 'metronome primer watchdog: primer alive', {
+        contextState: this.getContextState(),
+        primer: getPrimerDebugState(),
+      })
+      return
+    }
+
+    audioDiag('metronome-engine', 'metronome primer watchdog: failed', {
+      contextState: this.getContextState(),
+      primer: getPrimerDebugState(),
+      schedulerActive: Boolean(this.metronomeTimer),
+      metronomePlaying: this.metronomePlaying,
+    })
+  }
+
   clearMetronomeSchedulerForRestart(reason = 'restart') {
     if (this.metronomeTimer) {
       audioDiag('metronome-engine', 'clearing stale metronome scheduler before restart', { reason })
@@ -11498,16 +11639,29 @@ export class DroneEngine {
     this.fillMetronomeScheduleUntil(now + METRONOME_LOOKAHEAD_SECONDS, now)
   }
 
-  async startMetronome(bpm = this.metronomeBpm) {
-    audioDiag('metronome-engine', 'startMetronome ENTER', this.getMetronomeDiagnostics())
+  async startMetronome(bpm = this.metronomeBpm, { operationToken = null } = {}) {
+    this.metronomeStartOperationToken = operationToken
+    audioDiag('metronome-engine', 'startMetronome ENTER', {
+      ...this.getMetronomeDiagnostics(),
+      operationToken,
+    })
+
+    const assertCurrent = (phase) => {
+      if (!this.assertMetronomeOperationCurrent(phase, operationToken)) {
+        this.clearMetronomeSchedulerForRestart('stale-operation')
+        throw new Error(`stale metronome operation at ${phase}`)
+      }
+    }
 
     // IMPORTANT (iOS): resume the WebAudio context FIRST, while we are still inside the user
     // gesture's activation window. Awaiting the native bridge before Tone.start() can consume
     // the transient activation and leave the context suspended (silent metronome).
     audioDiag('metronome-engine', 'before Tone.start()', { contextState: this.getContextState() })
     await Tone.start()
+    assertCurrent('after-tone-start')
     audioDiag('metronome-engine', 'after Tone.start()', { contextState: this.getContextState() })
     await this.resumeContextIfNeeded()
+    assertCurrent('after-resume-context')
     audioDiag('metronome-engine', 'after resumeContextIfNeeded()', { contextState: this.getContextState() })
     this.ensureContextStateWatcher()
 
@@ -11515,6 +11669,7 @@ export class DroneEngine {
     // ignores the Ring/Silent switch (WKWebView can reset the session on context init). No-op off iOS.
     audioDiag('metronome-engine', 'before configureNativePlaybackSession')
     const sessionState = await configureNativePlaybackSession('metronome-post-context')
+    assertCurrent('after-native-session')
     audioDiag('metronome-engine', 'after configureNativePlaybackSession', {
       sessionState,
       contextState: this.getContextState(),
@@ -11524,11 +11679,12 @@ export class DroneEngine {
 
     if (this.metronomePlaying) {
       audioDiag('metronome-engine', 'startMetronome EARLY RETURN — already playing')
-      return
+      return this.getMetronomeDiagnostics()
     }
 
     audioDiag('metronome-engine', 'before ensureMetronomeChain()', this.getMetronomeDiagnostics())
     await this.ensureMetronomeChain()
+    assertCurrent('after-ensure-chain')
     audioDiag('metronome-engine', 'after ensureMetronomeChain()', {
       usesSampleFallback: this.metronomeUsesSampleFallback === true,
       contextState: this.getContextState(),
@@ -11537,6 +11693,7 @@ export class DroneEngine {
     this.clearMetronomeSchedulerForRestart('pre-start')
 
     const contextReady = await this.ensureContextRunningForMetronomeScheduler('metronome-pre-scheduler')
+    assertCurrent('after-context-recovery')
     if (!contextReady || this.getContextState() !== 'running') {
       this.clearMetronomeSchedulerForRestart('failed-context')
       audioDiag('metronome-engine', 'startMetronome FAILED — context not running before scheduler', {
@@ -11544,6 +11701,18 @@ export class DroneEngine {
       })
       throw new Error('AudioContext not running — cannot start metronome scheduler')
     }
+
+    const primerReady = await this.ensurePrimerPlayingForMetronomeScheduler(operationToken)
+    if (primerReady.stale) {
+      this.clearMetronomeSchedulerForRestart('stale-operation')
+      throw new Error('stale metronome operation before scheduler')
+    }
+    if (!primerReady.ok) {
+      this.clearMetronomeSchedulerForRestart('primer-not-ready')
+      throw new Error('Media primer not playing — cannot start metronome scheduler')
+    }
+
+    assertCurrent('pre-scheduler')
 
     this.metronomeActiveMeter = this.metronomeMeter
     this.metronomePendingMeter = null
@@ -11555,18 +11724,21 @@ export class DroneEngine {
     audioDiag('metronome-engine', 'before startMetronomeScheduler()', {
       contextState: this.getContextState(),
       primer: getPrimerDebugState(),
+      primerPlaying: isPrimerPlaying(),
     })
     this.startMetronomeScheduler()
     this.logMetronomeSchedulerStartDiagnostics()
+    this.scheduleMetronomePrimerWatchdog(operationToken)
     audioDiag('metronome-engine', 'startMetronome DONE — scheduler running', {
       contextState: this.getContextState(),
       schedulerActive: Boolean(this.metronomeTimer),
       metronomePlaying: this.metronomePlaying,
+      primerPlaying: isPrimerPlaying(),
     })
 
-    if (this.getContextState() !== 'running' || !this.metronomeTimer) {
+    if (this.getContextState() !== 'running' || !this.metronomeTimer || (isIosNative() && !isPrimerPlaying())) {
       this.clearMetronomeSchedulerForRestart('post-start-verify-failed')
-      throw new Error('Metronome scheduler failed to start with running context')
+      throw new Error('Metronome scheduler failed to start with running context and primer')
     }
 
     return this.getMetronomeDiagnostics()
@@ -11586,6 +11758,8 @@ export class DroneEngine {
   }
 
   stopMetronome() {
+    this.clearMetronomePrimerWatchdog()
+    this.metronomeStartOperationToken = null
     this.metronomePlaying = false
     this.metronomeMeasureBeatIndex = 0
     this.metronomePendingMeter = null

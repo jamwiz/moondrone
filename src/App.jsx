@@ -22,12 +22,16 @@ import { getMoonStageVisualStyle } from './moonVisuals'
 import { getMoonArtworkSrc } from './moonArtwork'
 import { audioDiag } from './audioDiagnostics'
 import { addNativeAudioSessionListeners, configureNativePlaybackSession } from './nativeAudioSession'
-import { ensurePrimerPlaying, getPrimerDebugState, pausePrimer } from './iosMediaPrimer'
+import { ensurePrimerPlaying, getPrimerDebugState, isIosNative, isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
 import {
   beginMediaPrimerStartup,
   endMediaPrimerStartup,
   isMediaPrimerStartupActive,
 } from './mediaPrimerStartupGuard'
+import {
+  beginMetronomeOperation,
+  isMetronomeOperationCurrent,
+} from './metronomeOperationControl'
 import { AudioDebugPanel } from './AudioDebugPanel'
 import './App.css'
 
@@ -140,6 +144,7 @@ function App() {
   const [atmosphereId, setAtmosphereId] = useState(readStoredAtmosphere)
   const [moodId, setMoodId] = useState(readStoredMood)
   const isStartingRef = useRef(false)
+  const metronomeStartPendingRef = useRef(false)
 
   useAppLifecycle(setIsPlaying, setIsMetronomePlaying, isPlaying, isMetronomePlaying)
 
@@ -168,6 +173,8 @@ function App() {
       }
 
       if (wasMetronomePlaying) {
+        beginMetronomeOperation('interruption')
+        metronomeStartPendingRef.current = false
         setIsMetronomePlaying(false)
       }
 
@@ -278,9 +285,11 @@ function App() {
 
   function isMetronomeEngineReady() {
     const diag = droneEngine.getMetronomeDiagnostics?.() ?? {}
+    const primerOk = !isIosNative() || diag.primerPlaying === true || getPrimerDebugState().playing === true
     return diag.metronomePlaying === true
       && diag.schedulerActive === true
       && diag.contextState === 'running'
+      && primerOk
   }
 
   function handlePlayPointerDown() {
@@ -472,8 +481,15 @@ function App() {
   async function handleMetronomePlay() {
     audioDiag('metronome', 'handleMetronomePlay invoked — UI BEFORE', {
       uiIsMetronomePlaying: isMetronomePlaying,
+      metronomeStartPending: metronomeStartPendingRef.current,
+      startupGuardActive: isMediaPrimerStartupActive(),
       ...droneEngine.getMetronomeDiagnostics?.(),
     })
+
+    if (metronomeStartPendingRef.current) {
+      audioDiag('metronome', 'handleMetronomePlay skipped — metronomeStartPending')
+      return
+    }
 
     if (isMetronomePlaying) {
       audioDiag('metronome', 'handleMetronomePlay EARLY RETURN — UI thinks metronome already playing', {
@@ -482,24 +498,40 @@ function App() {
       return
     }
 
+    const operationToken = beginMetronomeOperation('play')
+    metronomeStartPendingRef.current = true
     setMetronomePulse({ tick: 0, downbeat: false })
     beginMediaPrimerStartup('metronome-play')
     let guardEnded = false
 
     try {
       await primeForPlayback('metronome-play')
+
+      if (!isMetronomeOperationCurrent(operationToken)) {
+        audioDiag('metronome', 'stale metronome operation ignored', { phase: 'after-primeForPlayback' })
+        return
+      }
+
       droneEngine.setMetronomeSoundMode(metronomeSoundMode)
       droneEngine.setMetronomeMeter(metronomeMeter)
-      await droneEngine.startMetronome(metronomeBpm)
+      await droneEngine.startMetronome(metronomeBpm, { operationToken })
+
+      if (!isMetronomeOperationCurrent(operationToken)) {
+        audioDiag('metronome', 'stale metronome operation ignored', { phase: 'after-startMetronome' })
+        droneEngine.stopMetronome()
+        return
+      }
 
       if (!isMetronomeEngineReady()) {
         droneEngine.stopMetronome()
-        throw new Error('Metronome failed — context or scheduler not ready after start')
+        throw new Error('Metronome failed — context, scheduler, or primer not ready after start')
       }
 
       audioDiag('metronome', 'startMetronome resolved — setting UI isMetronomePlaying=true', {
         uiIsMetronomePlayingBefore: isMetronomePlaying,
+        operationToken,
         ...droneEngine.getMetronomeDiagnostics?.(),
+        primer: getPrimerDebugState(),
       })
       setIsMetronomePlaying(true)
       endMediaPrimerStartup('metronome-play-success')
@@ -508,20 +540,29 @@ function App() {
         note: 'React state updates on next render; panel shows live uiIsMetronomePlaying',
       })
     } catch (error) {
+      const shouldCleanup = isMetronomeOperationCurrent(operationToken)
+      if (shouldCleanup) {
+        beginMetronomeOperation('failed-start')
+      }
+
       audioDiag('metronome', 'handleMetronomePlay FAILED — metronome start failed', {
         message: error?.message ?? String(error),
         uiIsMetronomePlaying,
+        operationToken,
+        shouldCleanup,
         ...droneEngine.getMetronomeDiagnostics?.(),
+        primer: getPrimerDebugState(),
       })
       console.error('[Moondrone metronome] start failed', error)
       droneEngine.stopMetronome()
       setIsMetronomePlaying(false)
       endMediaPrimerStartup('metronome-play-failed', { immediate: true })
       guardEnded = true
-      if (!isPlaying) {
+      if (!isPlaying && shouldCleanup) {
         pausePrimer('metronome-play-failed', { force: true })
       }
     } finally {
+      metronomeStartPendingRef.current = false
       if (!guardEnded && isMediaPrimerStartupActive()) {
         endMediaPrimerStartup('metronome-play-finally-fallback', { immediate: true })
       }
@@ -529,16 +570,15 @@ function App() {
   }
 
   function handleMetronomeStop() {
-    if (!isMetronomePlaying) {
-      return
-    }
+    beginMetronomeOperation('stop')
+    metronomeStartPendingRef.current = false
 
     droneEngine.stopMetronome()
     setIsMetronomePlaying(false)
 
     // Keep the primer alive if the drone is still playing; otherwise we are now idle.
     if (!isPlaying) {
-      pausePrimer('metronome-stop')
+      pausePrimer('metronome-stop', { force: true })
     }
   }
 
@@ -609,6 +649,7 @@ function App() {
               meter={metronomeMeter}
               onMeterChange={handleMetronomeMeterChange}
               isPlaying={isMetronomePlaying}
+              metronomeStartPendingRef={metronomeStartPendingRef}
               onPlay={handleMetronomePlay}
               onStop={handleMetronomeStop}
             />

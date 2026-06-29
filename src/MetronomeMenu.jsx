@@ -5,6 +5,7 @@ import {
 } from './metronomeSamples'
 import { audioDiag } from './audioDiagnostics'
 import { droneEngine } from './droneEngine'
+import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
 
 export function MetronomeMenu({
   bpm,
@@ -14,12 +15,20 @@ export function MetronomeMenu({
   meter,
   onMeterChange,
   isPlaying,
+  metronomeStartPendingRef,
   onPlay,
   onStop,
 }) {
   const [isOpen, setIsOpen] = useState(false)
   const containerRef = useRef(null)
   const lastTransportActivationRef = useRef(0)
+  const playIssuedViaPointerRef = useRef(false)
+
+  useEffect(() => {
+    if (isPlaying) {
+      playIssuedViaPointerRef.current = false
+    }
+  }, [isPlaying])
 
   // The Play/Stop control lives inside a popover whose close-away handler listens on the
   // document for `pointerdown`. In the iOS WKWebView a plain `onClick` is unreliable here
@@ -30,8 +39,56 @@ export function MetronomeMenu({
     // it's deciding on (UI isPlaying prop + engine state + context + chain-ready value).
     audioDiag('metronome-tap', `event handler ENTERED via ${source}`, {
       uiIsPlaying: isPlaying,
+      metronomeStartPending: metronomeStartPendingRef?.current === true,
+      startupGuardActive: isMediaPrimerStartupActive(),
       ...(droneEngine.getMetronomeDiagnostics?.() ?? {}),
     })
+
+    if (isPlaying) {
+      playIssuedViaPointerRef.current = false
+      const now = Date.now()
+      if (now - lastTransportActivationRef.current < 500) {
+        audioDiag('metronome-tap', 'activation deduped (ignored)', { source, isPlaying: true })
+        return
+      }
+      lastTransportActivationRef.current = now
+      audioDiag('metronome-tap', 'calling onStop()', { source })
+      onStop()
+      return
+    }
+
+    if (source === 'click') {
+      if (
+        playIssuedViaPointerRef.current
+        || metronomeStartPendingRef?.current
+        || isMediaPrimerStartupActive()
+      ) {
+        audioDiag('metronome-tap', 'click fallback skipped — play already pending via pointerdown', {
+          source,
+          playIssuedViaPointer: playIssuedViaPointerRef.current,
+          metronomeStartPending: metronomeStartPendingRef?.current === true,
+          startupGuardActive: isMediaPrimerStartupActive(),
+        })
+        playIssuedViaPointerRef.current = false
+        return
+      }
+    }
+
+    if (source === 'pointerdowncapture') {
+      if (
+        metronomeStartPendingRef?.current
+        || isMediaPrimerStartupActive()
+        || droneEngine.isStarting === true
+      ) {
+        audioDiag('metronome-tap', 'pointerdown skipped — metronome start already pending', {
+          metronomeStartPending: metronomeStartPendingRef?.current === true,
+          startupGuardActive: isMediaPrimerStartupActive(),
+          engineIsStarting: droneEngine.isStarting === true,
+        })
+        return
+      }
+      playIssuedViaPointerRef.current = true
+    }
 
     const now = Date.now()
     if (now - lastTransportActivationRef.current < 500) {
@@ -40,13 +97,8 @@ export function MetronomeMenu({
     }
     lastTransportActivationRef.current = now
 
-    if (isPlaying) {
-      audioDiag('metronome-tap', 'calling onStop()', { source })
-      onStop()
-    } else {
-      audioDiag('metronome-tap', 'calling onPlay()', { source })
-      onPlay()
-    }
+    audioDiag('metronome-tap', 'calling onPlay()', { source })
+    onPlay()
   }
 
   useEffect(() => {
