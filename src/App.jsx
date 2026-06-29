@@ -22,7 +22,7 @@ import { getMoonStageVisualStyle } from './moonVisuals'
 import { getMoonArtworkSrc } from './moonArtwork'
 import { audioDiag } from './audioDiagnostics'
 import { addNativeAudioSessionListeners, configureNativePlaybackSession } from './nativeAudioSession'
-import { ensurePrimerPlaying, getPrimerDebugState, isIosNative, isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
+import { ensurePrimerPlaying, getPrimerDebugState, isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
 import {
   beginMediaPrimerStartup,
   endMediaPrimerStartup,
@@ -284,13 +284,13 @@ function App() {
   }
 
   function isMetronomeEngineReady() {
+    // UI honesty gate: scheduler/context must be genuinely alive. The primer is a one-time unlock
+    // and is intentionally NOT required here (it may pause after scheduling without breaking audio).
     const diag = droneEngine.getMetronomeDiagnostics?.() ?? {}
-    const primerOk = !isIosNative() || diag.primerPlaying === true || getPrimerDebugState().playing === true
     return diag.metronomePlaying === true
       && diag.schedulerActive === true
       && (diag.beatsScheduled ?? 0) > 0
       && diag.contextState === 'running'
-      && primerOk
   }
 
   function handlePlayPointerDown() {
@@ -503,12 +503,15 @@ function App() {
     metronomeStartPendingRef.current = true
     setMetronomePulse({ tick: 0, downbeat: false })
 
-    // If the drone is already playing on a running context (primer already alive on iOS), start the
-    // metronome against that live session: do NOT re-prime media or reconfigure the native session,
-    // which can emit an interruption that disrupts the drone.
+    // If the drone engine is genuinely alive (ready + master chain ready + context running), start
+    // the metronome against that live session: do NOT re-prime media or reconfigure the native
+    // session, which can emit an interruption that disrupts the drone. The primer is NOT required
+    // for this decision (it may already be paused while the drone plays fine).
+    const droneDiag = droneEngine.getMetronomeDiagnostics?.() ?? {}
     const droneAlreadyRunning = isPlaying
-      && droneEngine.getContextState?.() === 'running'
-      && (!isIosNative() || isPrimerPlaying())
+      && droneDiag.contextState === 'running'
+      && droneDiag.isReady === true
+      && droneDiag.masterChainReady === true
 
     if (!droneAlreadyRunning) {
       beginMediaPrimerStartup('metronome-play')

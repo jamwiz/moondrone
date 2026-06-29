@@ -9,6 +9,13 @@ const nativeSessionDebug = {
   registrationStatus: 'unknown',
 }
 
+// Throttle window for idempotent reconfigure: if the session is already Playback and was
+// configured this recently, a throttled caller (e.g. metronome start) skips the native call.
+// This prevents media-primer-before + metronome-post-context back-to-back churn that the
+// TestFlight log associated with spurious audioSessionInterrupted events.
+const NATIVE_SESSION_THROTTLE_MS = 1500
+let lastPlaybackConfiguredAt = 0
+
 export function getNativeSessionDebugState() {
   return {
     lastResult: nativeSessionDebug.lastResult,
@@ -37,13 +44,25 @@ function setNativeSessionDebug({ result, error, registrationStatus }) {
   }
 }
 
-export async function configureNativePlaybackSession(reason = 'play') {
+export async function configureNativePlaybackSession(reason = 'play', { throttle = false } = {}) {
   if (!isIosNative()) {
     setNativeSessionDebug({ result: null, error: null, registrationStatus: 'not-ios' })
     audioDiag('native-audio-session', `skipped — not iOS native (${reason})`, {
       platform: Capacitor.getPlatform(),
     })
     return null
+  }
+
+  if (
+    throttle
+    && nativeSessionDebug.lastResult
+    && nativeSessionDebug.lastResult.category === 'AVAudioSessionCategoryPlayback'
+    && Date.now() - lastPlaybackConfiguredAt < NATIVE_SESSION_THROTTLE_MS
+  ) {
+    audioDiag('native-audio-session', `configurePlaybackSession SKIPPED — throttled (recent Playback) (${reason})`, {
+      msSinceLast: Date.now() - lastPlaybackConfiguredAt,
+    })
+    return nativeSessionDebug.lastResult
   }
 
   audioDiag('native-audio-session', `configurePlaybackSession → calling native (${reason})`)
@@ -63,6 +82,9 @@ export async function configureNativePlaybackSession(reason = 'play') {
     }
 
     setNativeSessionDebug({ result: state, error: null, registrationStatus: 'registered' })
+    if (state.category === 'AVAudioSessionCategoryPlayback') {
+      lastPlaybackConfiguredAt = Date.now()
+    }
     audioDiag('native-audio-session', `configurePlaybackSession SUCCESS (${reason})`, state)
     return state
   } catch (error) {
