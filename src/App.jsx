@@ -22,6 +22,7 @@ import { getMoonStageVisualStyle } from './moonVisuals'
 import { getMoonArtworkSrc } from './moonArtwork'
 import { audioDiag } from './audioDiagnostics'
 import { addNativeAudioSessionListeners } from './nativeAudioSession'
+import { AudioDebugPanel } from './AudioDebugPanel'
 import './App.css'
 
 const DevOutputMeter = import.meta.env.DEV
@@ -348,7 +349,7 @@ function App() {
   }
 
   async function handleMetronomePlay() {
-    audioDiag('metronome', 'handleMetronomePlay invoked (reached App handler)', {
+    audioDiag('metronome', 'handleMetronomePlay invoked — UI BEFORE', {
       uiIsMetronomePlaying: isMetronomePlaying,
       ...droneEngine.getMetronomeDiagnostics?.(),
     })
@@ -360,18 +361,26 @@ function App() {
       return
     }
 
-    // Reset the pulse so no stale beat flashes before the first new beat.
     setMetronomePulse({ tick: 0, downbeat: false })
 
     try {
       droneEngine.setMetronomeSoundMode(metronomeSoundMode)
       droneEngine.setMetronomeMeter(metronomeMeter)
       await droneEngine.startMetronome(metronomeBpm)
-      audioDiag('metronome', 'startMetronome resolved — now playing', {
+      audioDiag('metronome', 'startMetronome resolved — setting UI isMetronomePlaying=true', {
+        uiIsMetronomePlayingBefore: isMetronomePlaying,
+        engineMetronomePlaying: droneEngine.getMetronomeDiagnostics?.()?.metronomePlaying,
         contextState: droneEngine.getContextState?.() ?? 'unknown',
       })
       setIsMetronomePlaying(true)
+      audioDiag('metronome', 'handleMetronomePlay complete — UI AFTER setState(true) requested', {
+        note: 'React state updates on next render; panel shows live uiIsMetronomePlaying',
+      })
     } catch (error) {
+      audioDiag('metronome', 'handleMetronomePlay FAILED — startMetronome threw', {
+        message: error?.message ?? String(error),
+        uiIsMetronomePlaying,
+      })
       console.error('[Moondrone metronome] start failed', error)
       setIsMetronomePlaying(false)
     }
@@ -740,6 +749,8 @@ function App() {
           <DevOutputMeter />
         </Suspense>
       ) : null}
+
+      <AudioDebugPanel uiIsMetronomePlaying={isMetronomePlaying} />
     </main>
   )
 }

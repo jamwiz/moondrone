@@ -1,17 +1,19 @@
-// Targeted iOS audio diagnostics with an in-app ring buffer.
-//
-// TestFlight device logs are hard to inspect, so every diagnostic is also kept
-// in a small in-memory ring buffer reachable from the console / automation via
-// window.moondroneDebug.audioLog(). Entries are only added on discrete events
-// (Play taps, audio-session calls, lifecycle/interruption transitions) — never
-// per beat or per frame — so this is safe to leave on in a release build.
-//
-// Set AUDIO_DIAG to false to silence console output; the buffer still records so
-// window.moondroneDebug.audioLog() remains useful.
+// Targeted iOS audio diagnostics with an in-app ring buffer + UI subscription.
 export const AUDIO_DIAG = true
 
 const MAX_ENTRIES = 200
 const buffer = []
+const uiListeners = new Set()
+
+function notifyUiListeners() {
+  uiListeners.forEach((listener) => {
+    try {
+      listener()
+    } catch {
+      // UI hook failure must never break logging.
+    }
+  })
+}
 
 export function audioDiag(scope, message, details) {
   const entry = {
@@ -25,6 +27,8 @@ export function audioDiag(scope, message, details) {
   if (buffer.length > MAX_ENTRIES) {
     buffer.shift()
   }
+
+  notifyUiListeners()
 
   if (!AUDIO_DIAG) {
     return
@@ -41,12 +45,37 @@ export function getAudioDiagnostics() {
   return buffer.slice()
 }
 
-export function clearAudioDiagnostics() {
-  buffer.length = 0
+export function getRecentAudioDiagnostics(count = 20) {
+  if (count <= 0) {
+    return []
+  }
+  return buffer.slice(-count)
 }
 
-// Expose the buffer in every build (not just dev) so a TestFlight build can be
-// inspected from a remote/web inspector console: window.moondroneDebug.audioLog().
+export function clearAudioDiagnostics() {
+  buffer.length = 0
+  notifyUiListeners()
+}
+
+export function subscribeAudioDiagnostics(listener) {
+  uiListeners.add(listener)
+  return () => {
+    uiListeners.delete(listener)
+  }
+}
+
+export function formatAudioDiagnosticsForCopy(entries = buffer) {
+  return entries
+    .map((entry) => {
+      const details =
+        entry.details == null
+          ? ''
+          : ` ${typeof entry.details === 'string' ? entry.details : JSON.stringify(entry.details)}`
+      return `${entry.t} [${entry.scope}] ${entry.message}${details}`
+    })
+    .join('\n')
+}
+
 if (typeof window !== 'undefined') {
   window.moondroneDebug = window.moondroneDebug || {}
   window.moondroneDebug.audioLog = getAudioDiagnostics

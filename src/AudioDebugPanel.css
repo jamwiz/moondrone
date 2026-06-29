@@ -1,0 +1,129 @@
+/* Temporary on-device iOS audio debug — remove when TestFlight issues are resolved. */
+.audio-debug-panel-toggle {
+  position: fixed;
+  right: 8px;
+  bottom: 8px;
+  z-index: 9999;
+  min-width: 44px;
+  min-height: 44px;
+  border: 1px solid rgba(255, 200, 120, 0.5);
+  border-radius: 8px;
+  background: rgba(20, 12, 8, 0.92);
+  color: #ffe0af;
+  font-size: 0.75rem;
+  font-weight: 800;
+}
+
+.audio-debug-panel {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 9998;
+  max-height: 55vh;
+  overflow: auto;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  border-top: 2px solid rgba(255, 200, 120, 0.45);
+  background: rgba(12, 8, 6, 0.96);
+  color: #f5e6d0;
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.audio-debug-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.audio-debug-panel-header-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.audio-debug-mini-button {
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 200, 120, 0.35);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.audio-debug-copy-status {
+  margin: 0 0 8px;
+  color: #9fd89f;
+}
+
+.audio-debug-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.audio-debug-label {
+  color: rgba(245, 230, 208, 0.65);
+  font-size: 0.64rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.audio-debug-value {
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.audio-debug-bad {
+  color: #ff8a80;
+}
+
+.audio-debug-block {
+  margin-bottom: 8px;
+}
+
+.audio-debug-pre,
+.audio-debug-events {
+  margin: 4px 0 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.64rem;
+}
+
+.audio-debug-events {
+  max-height: 140px;
+  overflow: auto;
+}
+
+.audio-debug-banner {
+  margin: 0 0 8px;
+  padding: 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  font-weight: 700;
+}
+
+.audio-debug-buttons {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.audio-debug-action {
+  min-height: 44px;
+  border: 1px solid rgba(255, 200, 120, 0.35);
+  border-radius: 8px;
+  background: rgba(255, 224, 175, 0.12);
+  color: #ffe0af;
+  font-size: 0.72rem;
+  font-weight: 800;
+}

@@ -6,11 +6,6 @@ import {
 import { audioDiag } from './audioDiagnostics'
 import { droneEngine } from './droneEngine'
 
-// TEMPORARY iOS debug: shows two extra buttons in the metronome popover to isolate whether the
-// problem is UI button wiring or the engine start path. Set to false (or delete the debug row)
-// once the metronome Play button is confirmed working on device.
-const METRONOME_DEBUG_BUTTONS = true
-
 export function MetronomeMenu({
   bpm,
   onBpmChange,
@@ -200,46 +195,6 @@ export function MetronomeMenu({
           >
             {isPlaying ? 'Stop' : 'Play'}
           </button>
-
-          {METRONOME_DEBUG_BUTTONS ? (
-            <div
-              style={{ display: 'flex', gap: '8px', marginTop: '10px' }}
-              aria-label="Metronome debug"
-            >
-              {/* Proves the UI/touch wiring works at all (no engine involved). */}
-              <button
-                type="button"
-                style={{ flex: 1, minHeight: '40px', touchAction: 'manipulation', fontSize: '0.8rem' }}
-                onPointerDownCapture={(event) => {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  audioDiag('metronome-test', 'TEST TAP works (pointerdowncapture)', {
-                    ...(droneEngine.getMetronomeDiagnostics?.() ?? {}),
-                  })
-                }}
-                onClick={() => audioDiag('metronome-test', 'TEST TAP works (click)')}
-              >
-                test tap
-              </button>
-
-              {/* Calls the real metronome start path directly, bypassing activateTransport/dedupe,
-                  so we can tell whether the engine start works independently of the toggle wiring. */}
-              <button
-                type="button"
-                style={{ flex: 1, minHeight: '40px', touchAction: 'manipulation', fontSize: '0.8rem' }}
-                onPointerDownCapture={(event) => {
-                  event.preventDefault()
-                  event.stopPropagation()
-                  audioDiag('metronome-test', 'TEST START → calling onPlay() directly', {
-                    ...(droneEngine.getMetronomeDiagnostics?.() ?? {}),
-                  })
-                  onPlay()
-                }}
-              >
-                test start
-              </button>
-            </div>
-          ) : null}
         </div>
       ) : null}
     </div>
