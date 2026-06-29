@@ -12,6 +12,7 @@ import {
   getNativeSessionDebugState,
   testNativePlaybackBeep,
 } from './nativeAudioSession'
+import { ensurePrimerPlaying, getPrimerDebugState } from './iosMediaPrimer'
 import './AudioDebugPanel.css'
 
 function formatJson(value) {
@@ -54,6 +55,7 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
   const [beepStatus, setBeepStatus] = useState(null)
   const [nativeBeepStatus, setNativeBeepStatus] = useState(null)
   const [webBeepPresetStatus, setWebBeepPresetStatus] = useState(null)
+  const [primerBeepStatus, setPrimerBeepStatus] = useState(null)
   const [engineSnapshot, setEngineSnapshot] = useState(getEngineSnapshot)
 
   const refresh = useCallback(() => {
@@ -265,6 +267,74 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
     }
   }
 
+  // Full Silent-Mode workaround test: native .playback → hidden HTMLAudioElement primer →
+  // Tone.start → raw WebAudio beep → reassert native. If this beep is audible in Silent Mode but
+  // the plain web beep is not, the media primer is the fix.
+  async function handleTestMediaPrimerWebBeep(event) {
+    event.preventDefault()
+    event.stopPropagation()
+    audioDiag('debug-panel', 'TEST MEDIA PRIMER + WEB BEEP pressed')
+
+    const status = {
+      nativeBefore: null,
+      primer: null,
+      contextBefore: getContextState(),
+      contextAfter: null,
+      beepStarted: false,
+      beepStopped: false,
+      nativeAfter: null,
+      error: null,
+    }
+    setPrimerBeepStatus({ ...status })
+
+    try {
+      const nativeBefore = await configureNativePlaybackSession('primer-beep-before')
+      status.nativeBefore = nativeBefore
+        ? { category: nativeBefore.category, mode: nativeBefore.mode, outputVolume: nativeBefore.outputVolume }
+        : null
+      setPrimerBeepStatus({ ...status })
+
+      await ensurePrimerPlaying('primer-beep-test')
+      status.primer = getPrimerDebugState()
+      setPrimerBeepStatus({ ...status })
+
+      await Tone.start()
+      status.contextAfter = getContextState()
+      setPrimerBeepStatus({ ...status })
+
+      const osc = new Tone.Oscillator({ frequency: 740, type: 'sine' }).toDestination()
+      osc.start()
+      status.beepStarted = true
+      setPrimerBeepStatus({ ...status })
+      audioDiag('debug-panel', 'primer+beep — beep started', { contextAfter: status.contextAfter })
+
+      window.setTimeout(() => {
+        try {
+          osc.stop()
+          osc.dispose()
+          status.beepStopped = true
+          status.primer = getPrimerDebugState()
+          setPrimerBeepStatus({ ...status })
+          audioDiag('debug-panel', 'primer+beep — beep stopped', { primer: status.primer })
+        } catch (stopError) {
+          status.error = stopError?.message ?? String(stopError)
+          setPrimerBeepStatus({ ...status })
+        }
+      }, 400)
+
+      const nativeAfter = await configureNativePlaybackSession('primer-beep-after')
+      status.nativeAfter = nativeAfter
+        ? { category: nativeAfter.category, mode: nativeAfter.mode, outputVolume: nativeAfter.outputVolume }
+        : null
+      setPrimerBeepStatus({ ...status })
+      refresh()
+    } catch (error) {
+      status.error = error?.message ?? String(error)
+      setPrimerBeepStatus({ ...status })
+      audioDiag('debug-panel', 'primer+beep error', { message: status.error })
+    }
+  }
+
   if (collapsed) {
     return (
       <button
@@ -368,6 +438,15 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
         </div>
       ) : null}
 
+      {primerBeepStatus ? (
+        <div className="audio-debug-block">
+          <div className="audio-debug-label">Media primer + web beep</div>
+          <pre className={`audio-debug-pre ${primerBeepStatus.error ? 'audio-debug-bad' : ''}`}>
+            {formatJson(primerBeepStatus)}
+          </pre>
+        </div>
+      ) : null}
+
       <div className="audio-debug-buttons">
         <button
           type="button"
@@ -408,6 +487,14 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
           onPointerDown={handleTestWebBeepNativePreset}
         >
           TEST WEB BEEP WITH NATIVE PRESET
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={handleTestMediaPrimerWebBeep}
+        >
+          TEST MEDIA PRIMER + WEB BEEP
         </button>
       </div>
 

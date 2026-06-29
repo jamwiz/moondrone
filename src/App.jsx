@@ -21,7 +21,8 @@ import { useAppLifecycle } from './useAppLifecycle'
 import { getMoonStageVisualStyle } from './moonVisuals'
 import { getMoonArtworkSrc } from './moonArtwork'
 import { audioDiag } from './audioDiagnostics'
-import { addNativeAudioSessionListeners } from './nativeAudioSession'
+import { addNativeAudioSessionListeners, configureNativePlaybackSession } from './nativeAudioSession'
+import { ensurePrimerPlaying, getPrimerDebugState, pausePrimer } from './iosMediaPrimer'
 import { AudioDebugPanel } from './AudioDebugPanel'
 import './App.css'
 
@@ -144,6 +145,7 @@ function App() {
       audioDiag('interruption', 'playback interrupted by iOS — resetting UI', {
         wasPlaying,
         wasMetronomePlaying,
+        primer: getPrimerDebugState(),
       })
 
       if (wasPlaying) {
@@ -153,6 +155,10 @@ function App() {
       if (wasMetronomePlaying) {
         setIsMetronomePlaying(false)
       }
+
+      // Interruption resets all audio → we are now idle, so stop the primer too (do not leave it
+      // running when idle). This does NOT change interruption policy; it only stops the primer.
+      pausePrimer('interruption-reset')
     }
 
     return () => {
@@ -222,6 +228,17 @@ function App() {
     }
   }
 
+  // iOS WKWebView Silent-Mode workaround: inside the user gesture, (a) assert native .playback,
+  // then (b) start the hidden HTMLAudioElement primer. Tone.start() + WebAudio happen next inside
+  // droneEngine.start()/startMetronome(), which also re-assert native .playback afterwards (step e).
+  // No-op on web/Android.
+  async function primeForPlayback(reason) {
+    audioDiag('media-primer', `primeForPlayback BEGIN (${reason})`)
+    await configureNativePlaybackSession('media-primer-before')
+    await ensurePrimerPlaying(reason)
+    audioDiag('media-primer', `primeForPlayback END (${reason})`, getPrimerDebugState())
+  }
+
   async function handlePlay() {
     if (isPlaying || isStartingRef.current) {
       return
@@ -230,11 +247,15 @@ function App() {
     isStartingRef.current = true
 
     try {
+      await primeForPlayback('drone-play')
       applyBinauralBeatToEngine()
       await droneEngine.start(selectedKey, toEngineVolume(volume), selectedOctave, intensity, breath, FIXED_REVERB_PERCENT)
       setIsPlaying(true)
     } catch {
       setIsPlaying(false)
+      if (!isMetronomePlaying) {
+        pausePrimer('drone-play-failed')
+      }
     } finally {
       isStartingRef.current = false
     }
@@ -247,6 +268,11 @@ function App() {
 
     droneEngine.stop()
     setIsPlaying(false)
+
+    // Keep the primer alive if the metronome is still playing; otherwise we are now idle.
+    if (!isMetronomePlaying) {
+      pausePrimer('drone-stop')
+    }
   }
 
   function shouldForwardKeyToEngine() {
@@ -267,11 +293,15 @@ function App() {
     isStartingRef.current = true
 
     try {
+      await primeForPlayback('drone-key-change-start')
       applyBinauralBeatToEngine()
       await droneEngine.start(key, toEngineVolume(volume), selectedOctave, intensity, breath, FIXED_REVERB_PERCENT)
       setIsPlaying(true)
     } catch {
       setIsPlaying(false)
+      if (!isMetronomePlaying) {
+        pausePrimer('drone-key-change-failed')
+      }
     } finally {
       isStartingRef.current = false
     }
@@ -364,6 +394,7 @@ function App() {
     setMetronomePulse({ tick: 0, downbeat: false })
 
     try {
+      await primeForPlayback('metronome-play')
       droneEngine.setMetronomeSoundMode(metronomeSoundMode)
       droneEngine.setMetronomeMeter(metronomeMeter)
       await droneEngine.startMetronome(metronomeBpm)
@@ -383,6 +414,9 @@ function App() {
       })
       console.error('[Moondrone metronome] start failed', error)
       setIsMetronomePlaying(false)
+      if (!isPlaying) {
+        pausePrimer('metronome-play-failed')
+      }
     }
   }
 
@@ -393,6 +427,11 @@ function App() {
 
     droneEngine.stopMetronome()
     setIsMetronomePlaying(false)
+
+    // Keep the primer alive if the drone is still playing; otherwise we are now idle.
+    if (!isPlaying) {
+      pausePrimer('metronome-stop')
+    }
   }
 
   function handleMetronomeBpmChange(event) {

@@ -3,6 +3,7 @@ import { Capacitor } from '@capacitor/core'
 import { droneEngine } from './droneEngine'
 import { audioDiag } from './audioDiagnostics'
 import { getNativeSessionDebugState } from './nativeAudioSession'
+import { isPrimerPlaying } from './iosMediaPrimer'
 
 // Snapshot used by every lifecycle diagnostic so the debug panel can show what the app saw at
 // each background/foreground transition.
@@ -14,11 +15,19 @@ function lifecycleSnapshot(extra = {}) {
     nativeCategory = 'error'
   }
 
+  let primerPlaying = 'n/a'
+  try {
+    primerPlaying = isPrimerPlaying()
+  } catch {
+    primerPlaying = 'error'
+  }
+
   return {
     engineIsPlaying: droneEngine.isPlaying,
     contextState: droneEngine.getContextState?.() ?? 'unknown',
     documentHidden: typeof document !== 'undefined' ? document.hidden : 'n/a',
     nativeCategory,
+    primerPlaying,
     iosBackgroundAudio: shouldAllowIosBackgroundPlayback(),
     ...extra,
   }
