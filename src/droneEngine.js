@@ -8,6 +8,7 @@ import {
   METRONOME_SAMPLE_URLS,
   METRONOME_STRAIGHT_METER,
   TRIANGLE_OPEN_PLAYER_POOL_SIZE,
+  resolveMetronomeSampleUrl as resolveMetronomeAssetUrl,
 } from './metronomeSamples'
 
 import {
@@ -10792,15 +10793,7 @@ export class DroneEngine {
   }
 
   resolveMetronomeSampleUrl(relativeUrl) {
-    if (typeof window === 'undefined' || !relativeUrl) {
-      return relativeUrl
-    }
-
-    try {
-      return new URL(relativeUrl, window.location.href).href
-    } catch {
-      return relativeUrl
-    }
+    return resolveMetronomeAssetUrl(relativeUrl)
   }
 
   logMetronomeSampleLoadFailure(sampleId, relativeUrl, details = {}) {
@@ -10824,21 +10817,28 @@ export class DroneEngine {
   // later by Tone.loaded() + collectMetronomeSampleLoadFailures().
   async verifyMetronomeSampleUrl(url) {
     const resolvedUrl = this.resolveMetronomeSampleUrl(url)
+    audioDiag('metronome-samples', 'preflight sample URL', { url, resolvedUrl })
 
     try {
-      const response = await fetch(url)
+      const response = await fetch(resolvedUrl)
 
       if (!response.ok) {
+        audioDiag('metronome-samples', 'preflight HTTP failed', {
+          url,
+          resolvedUrl,
+          status: response.status,
+        })
         console.warn('[Moondrone metronome] Sample preflight failed', {
           url,
           resolvedUrl,
           status: response.status,
           statusText: response.statusText,
         })
-        return
+        return false
       }
 
       const contentType = response.headers.get('content-type') || ''
+      audioDiag('metronome-samples', 'preflight HTTP ok', { url, resolvedUrl, contentType })
 
       if (contentType && !contentType.includes('audio') && !contentType.includes('octet-stream')) {
         console.warn('[Moondrone metronome] Sample preflight unexpected content-type', {
@@ -10847,14 +10847,20 @@ export class DroneEngine {
           contentType,
         })
       }
+
+      return true
     } catch (error) {
-      // fetch() can reject for custom-scheme/CORS reasons in native WebViews even
-      // when the asset loads fine via Tone.Player. Do not block on it.
+      audioDiag('metronome-samples', 'preflight fetch skipped/failed (non-fatal)', {
+        url,
+        resolvedUrl,
+        error: error?.message ?? String(error),
+      })
       console.warn('[Moondrone metronome] Sample preflight skipped', {
         url,
         resolvedUrl,
         error: error?.message ?? String(error),
       })
+      return null
     }
   }
 
@@ -10871,14 +10877,24 @@ export class DroneEngine {
 
   createMetronomePlayer(url) {
     const resolvedUrl = this.resolveMetronomeSampleUrl(url)
+    audioDiag('metronome-samples', 'creating Tone.Player', { url, resolvedUrl })
+
     const player = new Tone.Player({
-      url,
+      url: resolvedUrl,
       onerror: (error) => {
         this.logMetronomeSampleLoadFailure('player', url, {
           resolvedUrl,
           error: error?.message ?? String(error),
           phase: 'Tone.Player.onerror',
         })
+        audioDiag('metronome-samples', 'Tone.Player onerror', {
+          url,
+          resolvedUrl,
+          error: error?.message ?? String(error),
+        })
+      },
+      onload: () => {
+        audioDiag('metronome-samples', 'Tone.Player loaded', { url, resolvedUrl })
       },
     })
 
@@ -10911,6 +10927,12 @@ export class DroneEngine {
           playerState: player.state,
           bufferLoaded: Boolean(player.buffer),
           phase: 'Tone.loaded',
+        })
+        audioDiag('metronome-samples', 'player not loaded after Tone.loaded', {
+          sampleId,
+          url: relativeUrl,
+          resolvedUrl: this.resolveMetronomeSampleUrl(relativeUrl),
+          index,
         })
       })
     })
@@ -10946,6 +10968,13 @@ export class DroneEngine {
     volumeParam.exponentialRampToValueAtTime(-100, time + 0.045)
   }
 
+  activateMetronomeSampleFallback(reason, details = {}) {
+    this.metronomeUsesSampleFallback = true
+    this.ensureMetronomeFallbackClick()
+    audioDiag('metronome-samples', `using oscillator fallback (${reason})`, details)
+    console.warn('[Moondrone metronome] Using oscillator fallback click', { reason, ...details })
+  }
+
   async ensureMetronomeChain() {
     if (this.metronomeChainReady) {
       audioDiag('metronome-engine', 'ensureMetronomeChain → reusing existing chain (no rebuild)')
@@ -10955,6 +10984,18 @@ export class DroneEngine {
     audioDiag('metronome-engine', 'ensureMetronomeChain → building fresh chain')
     this.metronomeChainReady = (async () => {
       try {
+        audioDiag('metronome-engine', 'metronome chain: sample URLs', {
+          urls: Object.fromEntries(
+            METRONOME_SAMPLE_IDS.map((sampleId) => [
+              sampleId,
+              {
+                path: METRONOME_SAMPLE_URLS[sampleId],
+                resolved: this.resolveMetronomeSampleUrl(METRONOME_SAMPLE_URLS[sampleId]),
+              },
+            ]),
+          ),
+        })
+
         audioDiag('metronome-engine', 'metronome chain: verifying samples')
         await Promise.all(
           METRONOME_SAMPLE_IDS.map((sampleId) => this.verifyMetronomeSampleUrl(METRONOME_SAMPLE_URLS[sampleId])),
@@ -10991,32 +11032,80 @@ export class DroneEngine {
           ),
           triangleClosed: [this.createMetronomePlayer(METRONOME_SAMPLE_URLS.triangleClosed)],
         }
-        await Tone.loaded()
+
+        try {
+          await Tone.loaded()
+          audioDiag('metronome-samples', 'Tone.loaded resolved')
+        } catch (loadError) {
+          audioDiag('metronome-samples', 'Tone.loaded rejected (non-fatal — checking players)', {
+            message: loadError?.message ?? String(loadError),
+          })
+        }
+
         const sampleFailures = this.collectMetronomeSampleLoadFailures()
 
         if (sampleFailures.length > 0) {
-          this.metronomeUsesSampleFallback = true
-          this.ensureMetronomeFallbackClick()
-          console.warn('[Moondrone metronome] Using oscillator fallback click because sample loading failed', {
+          this.activateMetronomeSampleFallback('sample-load-failures', {
             failureCount: sampleFailures.length,
             failures: sampleFailures,
           })
         } else {
           this.metronomeUsesSampleFallback = false
+          audioDiag('metronome-samples', 'all sample players loaded successfully')
         }
+
         audioDiag('metronome-engine', 'metronome chain: build complete', {
           usesSampleFallback: this.metronomeUsesSampleFallback === true,
         })
       } catch (error) {
-        this.metronomeChainReady = null
-        audioDiag('metronome-engine', 'metronome chain: BUILD FAILED', {
+        audioDiag('metronome-engine', 'metronome chain: BUILD FAILED — attempting oscillator fallback', {
           message: error?.message ?? String(error),
         })
-        console.error('[Moondrone metronome] Metronome chain setup failed', {
-          message: error?.message ?? String(error),
-          error,
-        })
-        throw error
+
+        try {
+          if (!this.masterChainReady) {
+            this.ensureMasterOutput()
+          }
+
+          if (!this.metronomeTrim) {
+            this.metronomeTrim = new Tone.Volume(METRONOME_TRIM_DB)
+            this.metronomeSoftClip = this.createMetronomeSoftClipper()
+            this.metronomePresenceEq = new Tone.Filter({
+              type: 'peaking',
+              frequency: METRONOME_PRESENCE_FREQUENCY,
+              Q: METRONOME_PRESENCE_Q,
+              gain: METRONOME_PRESENCE_GAIN_DB,
+            })
+            this.metronomeClickEq = new Tone.Filter({
+              type: 'peaking',
+              frequency: METRONOME_CLICK_FREQUENCY,
+              Q: METRONOME_CLICK_Q,
+              gain: METRONOME_CLICK_GAIN_DB,
+            })
+            this.metronomeGain = new Tone.Volume(METRONOME_OUTPUT_DB)
+            this.metronomeTrim.connect(this.metronomePresenceEq)
+            this.metronomePresenceEq.connect(this.metronomeClickEq)
+            this.metronomeClickEq.connect(this.metronomeSoftClip)
+            this.metronomeSoftClip.connect(this.metronomeGain)
+            this.metronomeGain.connect(this.masterLimiter)
+          }
+
+          this.metronomePlayerPools = null
+          this.activateMetronomeSampleFallback('chain-build-error', {
+            message: error?.message ?? String(error),
+          })
+          audioDiag('metronome-engine', 'metronome chain: recovered with oscillator fallback')
+        } catch (fallbackError) {
+          this.metronomeChainReady = null
+          audioDiag('metronome-engine', 'metronome chain: fallback setup FAILED', {
+            message: fallbackError?.message ?? String(fallbackError),
+          })
+          console.error('[Moondrone metronome] Metronome chain setup failed', {
+            message: fallbackError?.message ?? String(fallbackError),
+            error: fallbackError,
+          })
+          throw fallbackError
+        }
       }
     })()
 

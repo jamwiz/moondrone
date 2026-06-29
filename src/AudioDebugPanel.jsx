@@ -7,7 +7,11 @@ import {
   getRecentAudioDiagnostics,
   subscribeAudioDiagnostics,
 } from './audioDiagnostics'
-import { configureNativePlaybackSession, getNativeSessionDebugState } from './nativeAudioSession'
+import {
+  configureNativePlaybackSession,
+  getNativeSessionDebugState,
+  testNativePlaybackBeep,
+} from './nativeAudioSession'
 import './AudioDebugPanel.css'
 
 function formatJson(value) {
@@ -48,6 +52,8 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
   const [copyStatus, setCopyStatus] = useState('')
   const [nativeTestMessage, setNativeTestMessage] = useState('')
   const [beepStatus, setBeepStatus] = useState(null)
+  const [nativeBeepStatus, setNativeBeepStatus] = useState(null)
+  const [webBeepPresetStatus, setWebBeepPresetStatus] = useState(null)
   const [engineSnapshot, setEngineSnapshot] = useState(getEngineSnapshot)
 
   const refresh = useCallback(() => {
@@ -183,6 +189,82 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
     }
   }
 
+  async function handleTestNativeBeep(event) {
+    event.preventDefault()
+    event.stopPropagation()
+    audioDiag('debug-panel', 'TEST NATIVE BEEP pressed')
+    setNativeBeepStatus({ pending: true })
+
+    const result = await testNativePlaybackBeep()
+    setNativeBeepStatus(result)
+    refresh()
+  }
+
+  // Proves whether asserting native .playback IMMEDIATELY BEFORE WebAudio (vs after) changes
+  // Silent Mode behavior. Native is called before AND after Tone.start; Tone.start is NOT awaited
+  // behind a blocking native call in a way that loses the gesture — native-before is fired first
+  // but Tone.start runs in the same handler tick right after.
+  async function handleTestWebBeepNativePreset(event) {
+    event.preventDefault()
+    event.stopPropagation()
+    audioDiag('debug-panel', 'web beep native preset pressed')
+
+    const status = {
+      nativeBefore: null,
+      contextBefore: getContextState(),
+      contextAfter: null,
+      beepStarted: false,
+      beepStopped: false,
+      nativeAfter: null,
+      error: null,
+    }
+    setWebBeepPresetStatus({ ...status })
+
+    try {
+      const nativeBefore = await configureNativePlaybackSession('web-beep-before-tone')
+      status.nativeBefore = nativeBefore
+        ? { category: nativeBefore.category, mode: nativeBefore.mode, outputVolume: nativeBefore.outputVolume }
+        : null
+      setWebBeepPresetStatus({ ...status })
+
+      await Tone.start()
+      status.contextAfter = getContextState()
+      setWebBeepPresetStatus({ ...status })
+
+      const osc = new Tone.Oscillator({ frequency: 660, type: 'sine' }).toDestination()
+      osc.start()
+      status.beepStarted = true
+      setWebBeepPresetStatus({ ...status })
+      audioDiag('debug-panel', 'web beep native preset — beep started', {
+        contextAfter: status.contextAfter,
+      })
+
+      window.setTimeout(() => {
+        try {
+          osc.stop()
+          osc.dispose()
+          status.beepStopped = true
+          setWebBeepPresetStatus({ ...status })
+          audioDiag('debug-panel', 'web beep native preset — beep stopped')
+        } catch (stopError) {
+          status.error = stopError?.message ?? String(stopError)
+          setWebBeepPresetStatus({ ...status })
+        }
+      }, 350)
+
+      const nativeAfter = await configureNativePlaybackSession('web-beep-after-tone')
+      status.nativeAfter = nativeAfter
+        ? { category: nativeAfter.category, mode: nativeAfter.mode, outputVolume: nativeAfter.outputVolume }
+        : null
+      setWebBeepPresetStatus({ ...status })
+      refresh()
+    } catch (error) {
+      status.error = error?.message ?? String(error)
+      setWebBeepPresetStatus({ ...status })
+      audioDiag('debug-panel', 'web beep native preset error', { message: status.error })
+    }
+  }
+
   if (collapsed) {
     return (
       <button
@@ -263,8 +345,26 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
 
       {beepStatus ? (
         <div className="audio-debug-block">
-          <div className="audio-debug-label">Raw beep test</div>
+          <div className="audio-debug-label">Raw web beep test</div>
           <pre className="audio-debug-pre">{formatJson(beepStatus)}</pre>
+        </div>
+      ) : null}
+
+      {nativeBeepStatus ? (
+        <div className="audio-debug-block">
+          <div className="audio-debug-label">Native beep test (AVAudioEngine)</div>
+          <pre className={`audio-debug-pre ${nativeBeepStatus.error ? 'audio-debug-bad' : ''}`}>
+            {formatJson(nativeBeepStatus)}
+          </pre>
+        </div>
+      ) : null}
+
+      {webBeepPresetStatus ? (
+        <div className="audio-debug-block">
+          <div className="audio-debug-label">Web beep w/ native preset</div>
+          <pre className={`audio-debug-pre ${webBeepPresetStatus.error ? 'audio-debug-bad' : ''}`}>
+            {formatJson(webBeepPresetStatus)}
+          </pre>
         </div>
       ) : null}
 
@@ -292,6 +392,22 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
           onPointerDown={handleTestRawBeep}
         >
           TEST RAW WEB AUDIO BEEP
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={handleTestNativeBeep}
+        >
+          TEST NATIVE BEEP
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={handleTestWebBeepNativePreset}
+        >
+          TEST WEB BEEP WITH NATIVE PRESET
         </button>
       </div>
 

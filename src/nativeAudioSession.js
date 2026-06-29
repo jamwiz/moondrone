@@ -81,6 +81,28 @@ export async function configureNativePlaybackSession(reason = 'play') {
   }
 }
 
+// Plays a short beep using NATIVE iOS audio (AVAudioEngine), bypassing WebAudio entirely.
+// Returns { ...sessionState, beepStarted } on success, or { error } on failure / non-iOS.
+export async function testNativePlaybackBeep() {
+  if (!isIosNative()) {
+    const result = { error: 'not iOS native', platform: Capacitor.getPlatform() }
+    audioDiag('native-audio-session', 'testNativeBeep skipped — not iOS native', result)
+    return result
+  }
+
+  audioDiag('native-audio-session', 'testNativeBeep → calling native')
+
+  try {
+    const state = await MoondroneAudio.testNativeBeep()
+    audioDiag('native-audio-session', 'testNativeBeep SUCCESS', state)
+    return state
+  } catch (error) {
+    const result = { error: error?.message ?? String(error), code: error?.code ?? null }
+    audioDiag('native-audio-session', 'testNativeBeep FAILED', result)
+    return result
+  }
+}
+
 export function addNativeAudioSessionListeners({ onInterrupted, onInterruptionEnded } = {}) {
   if (!isIosNative()) {
     return () => {}

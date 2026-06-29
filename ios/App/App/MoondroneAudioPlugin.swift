@@ -56,10 +56,15 @@ public class MoondroneAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     public let identifier = "MoondroneAudioPlugin"
     public let jsName = "MoondroneAudio"
     public let pluginMethods: [CAPPluginMethod] = [
-        CAPPluginMethod(name: "configurePlaybackSession", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "configurePlaybackSession", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "testNativeBeep", returnType: CAPPluginReturnPromise)
     ]
 
     private var observersRegistered = false
+
+    // Held strongly so ARC does not deallocate them mid-beep (would cut the sound short / silently).
+    private var beepEngine: AVAudioEngine?
+    private var beepPlayer: AVAudioPlayerNode?
 
     public override func load() {
         print("⚡️ [MoondroneAudio] plugin load() — instance registered with bridge")
@@ -73,6 +78,74 @@ public class MoondroneAudioPlugin: CAPPlugin, CAPBridgedPlugin {
         let state = AudioSessionManager.configureForPlayback("js-configure")
         print("⚡️ [MoondroneAudio] configurePlaybackSession RESOLVING with:", state)
         call.resolve(state)
+    }
+
+    /// Plays a short beep using NATIVE iOS audio (AVAudioEngine), NOT WebAudio.
+    /// First asserts `.playback` via the same AudioSessionManager path used by configurePlaybackSession.
+    ///
+    /// Diagnostic purpose:
+    ///   - Audible with Silent Mode ON  → AVAudioSession `.playback` truly works; remaining mute is
+    ///     WKWebView/WebAudio-specific.
+    ///   - Muted with Silent Mode ON    → the AVAudioSession setup is still incomplete despite
+    ///     reporting `.playback`.
+    @objc func testNativeBeep(_ call: CAPPluginCall) {
+        print("⚡️ [MoondroneAudio] testNativeBeep ENTERED (native Swift)")
+        let sessionState = AudioSessionManager.configureForPlayback("native-beep")
+
+        let sampleRate = 44100.0
+        let duration = 0.4
+        let frequency = 880.0
+
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1) else {
+            call.reject("native beep: could not create AVAudioFormat")
+            return
+        }
+
+        let frameCount = AVAudioFrameCount(sampleRate * duration)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount),
+              let channelData = buffer.floatChannelData else {
+            call.reject("native beep: could not create AVAudioPCMBuffer")
+            return
+        }
+
+        buffer.frameLength = frameCount
+        for frame in 0..<Int(frameCount) {
+            let t = Double(frame) / sampleRate
+            let envelope = exp(-t * 3.0)
+            channelData[0][frame] = Float(sin(2.0 * Double.pi * frequency * t) * envelope * 0.6)
+        }
+
+        let engine = AVAudioEngine()
+        let player = AVAudioPlayerNode()
+        engine.attach(player)
+        engine.connect(player, to: engine.mainMixerNode, format: format)
+
+        do {
+            try engine.start()
+        } catch {
+            print("⚡️ [MoondroneAudio] testNativeBeep engine.start FAILED:", error)
+            call.reject("native beep: engine.start failed: \(error.localizedDescription)")
+            return
+        }
+
+        player.scheduleBuffer(buffer, at: nil, options: [], completionHandler: nil)
+        player.play()
+        self.beepEngine = engine
+        self.beepPlayer = player
+        print("⚡️ [MoondroneAudio] testNativeBeep playing")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.2) { [weak self] in
+            player.stop()
+            engine.stop()
+            self?.beepEngine = nil
+            self?.beepPlayer = nil
+            print("⚡️ [MoondroneAudio] testNativeBeep stopped")
+        }
+
+        var result = sessionState
+        result["beepStarted"] = true
+        result["engine"] = "AVAudioEngine"
+        call.resolve(result)
     }
 
     private func registerObservers() {
