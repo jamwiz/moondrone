@@ -18,6 +18,27 @@ export function MetronomeMenu({
 }) {
   const [isOpen, setIsOpen] = useState(false)
   const containerRef = useRef(null)
+  const lastTransportActivationRef = useRef(0)
+
+  // The Play/Stop control lives inside a popover whose close-away handler listens on the
+  // document for `pointerdown`. In the iOS WKWebView a plain `onClick` is unreliable here
+  // (the synthetic click can be dropped after the touch sequence), so we activate on
+  // `pointerup`/`touchend` AND `click`, de-duplicated so a normal tap only toggles once.
+  function activateTransport(source) {
+    const now = Date.now()
+    if (now - lastTransportActivationRef.current < 500) {
+      audioDiag('metronome-tap', 'activation deduped', { source, isPlaying })
+      return
+    }
+    lastTransportActivationRef.current = now
+
+    audioDiag('metronome-tap', 'handler invoked', { source, isPlaying })
+    if (isPlaying) {
+      onStop()
+    } else {
+      onPlay()
+    }
+  }
 
   useEffect(() => {
     if (!isOpen) {
@@ -139,16 +160,18 @@ export function MetronomeMenu({
             // touch-action: manipulation removes the iOS double-tap delay and keeps the
             // tap from being swallowed as a gesture inside the WKWebView popover.
             style={{ touchAction: 'manipulation' }}
-            onPointerDown={() => audioDiag('metronome-tap', 'pointerdown', { isPlaying })}
-            onTouchStart={() => audioDiag('metronome-tap', 'touchstart', { isPlaying })}
-            onClick={() => {
-              audioDiag('metronome-tap', 'click', { isPlaying })
-              if (isPlaying) {
-                onStop()
-              } else {
-                onPlay()
-              }
+            // Stop the tap from reaching the document close-away handler so the popover
+            // cannot close/re-render mid-tap and swallow the activation on iOS.
+            onPointerDown={(event) => {
+              event.stopPropagation()
+              audioDiag('metronome-tap', 'pointerdown', { isPlaying })
             }}
+            onPointerUp={(event) => {
+              event.stopPropagation()
+              activateTransport('pointerup')
+            }}
+            onTouchEnd={() => activateTransport('touchend')}
+            onClick={() => activateTransport('click')}
             aria-label={isPlaying ? 'Stop metronome' : 'Start metronome'}
           >
             {isPlaying ? 'Stop' : 'Play'}

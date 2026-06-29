@@ -21,6 +21,7 @@ import { useAppLifecycle } from './useAppLifecycle'
 import { getMoonStageVisualStyle } from './moonVisuals'
 import { getMoonArtworkSrc } from './moonArtwork'
 import { audioDiag } from './audioDiagnostics'
+import { addNativeAudioSessionListeners } from './nativeAudioSession'
 import './App.css'
 
 const DevOutputMeter = import.meta.env.DEV
@@ -156,6 +157,20 @@ function App() {
     return () => {
       droneEngine.onPlaybackInterrupted = null
     }
+  }, [])
+
+  // iOS native: the AVAudioSession plugin tells us when another app/call/Siri takes audio focus
+  // or media services reset. Hard-reset the engine (kills stale nodes so the next Play has no pop)
+  // and reset the UI honestly. We never auto-resume — the user must press Play again.
+  useEffect(() => {
+    const cleanup = addNativeAudioSessionListeners({
+      onInterrupted: (data) => {
+        audioDiag('interruption', 'native audio session interrupted', data)
+        droneEngine.handleNativeAudioInterruption(data?.reason ?? 'native')
+      },
+    })
+
+    return cleanup
   }, [])
 
   // One moon pulse per actual metronome beat (synced to the audio clock via the

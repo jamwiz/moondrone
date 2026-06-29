@@ -1,5 +1,6 @@
 import * as Tone from 'tone'
 import { audioDiag } from './audioDiagnostics'
+import { configureNativePlaybackSession } from './nativeAudioSession'
 import {
   DEFAULT_METRONOME_METER,
   DEFAULT_METRONOME_SOUND_MODE,
@@ -488,6 +489,15 @@ export class DroneEngine {
     try {
       this.currentKey = key
       this.currentOctave = octave
+
+      // iOS only: re-assert AVAudioSession `.playback` natively BEFORE WebAudio starts, so audio
+      // ignores the Ring/Silent switch. AppDelegate launch setup alone is not enough — WKWebView
+      // can reset the shared session when the context is first created. No-op on web/Android.
+      audioDiag('drone-engine', 'drone Play pressed', { contextState: this.getContextState() })
+      await configureNativePlaybackSession('drone-start')
+      audioDiag('drone-engine', 'context state after native session call', {
+        contextState: this.getContextState(),
+      })
 
       // Browsers require Tone.start() to run from the Play button gesture before nodes are created.
       await Tone.start()
@@ -8761,29 +8771,107 @@ export class DroneEngine {
       return
     }
 
+    this.handleNativeAudioInterruption('context-interrupted')
+  }
+
+  // Single entry point for "iOS took our audio focus" — reached from the AudioContext
+  // 'interrupted' state watcher AND from the native AVAudioSession interruption plugin.
+  // Hard-resets the graph so the next Play rebuilds from silence (no pop), then tells the UI.
+  handleNativeAudioInterruption(reason = 'native') {
     const wasPlaying = this.isPlaying
     const wasMetronomePlaying = this.metronomePlaying
 
-    if (!wasPlaying && !wasMetronomePlaying) {
+    if (!wasPlaying && !wasMetronomePlaying && !this.isReady && !this.masterChainReady) {
       return
     }
 
-    console.warn('[Moondrone audio-interruption] AudioContext interrupted by iOS — stopping cleanly', {
+    console.warn('[Moondrone audio-interruption] iOS pulled audio focus — hard reset', {
+      reason,
       wasPlaying,
       wasMetronomePlaying,
     })
 
-    // Reuse the existing immediate-stop path (gains to 0, timers cleared) so nothing
-    // resumes silently. Does not change steady-state sound design or transitions.
-    this.stopForLifecycle()
+    this.hardResetAudioGraph(reason)
 
-    if (this.onPlaybackInterrupted) {
+    if ((wasPlaying || wasMetronomePlaying) && this.onPlaybackInterrupted) {
       try {
         this.onPlaybackInterrupted({ wasPlaying, wasMetronomePlaying })
       } catch {
         // A UI hook failure must never break audio teardown.
       }
     }
+  }
+
+  // Kill all audio immediately and dispose the graph so the next Play starts from a fresh,
+  // silent chain. This is what prevents the loud pop/burst when returning from a background
+  // interruption: stale Tone nodes, scheduled ramps, and suspended oscillators are destroyed
+  // rather than resumed. Next Play rebuilds via ensureSignalChain()/ensureMetronomeChain().
+  hardResetAudioGraph(reason = 'interruption') {
+    audioDiag('hard-reset', `begin (${reason})`, {
+      contextState: this.getContextState(),
+      wasPlaying: this.isPlaying,
+      wasMetronomePlaying: this.metronomePlaying,
+      isReady: this.isReady,
+    })
+
+    // 1. Mute the final output first so the teardown itself cannot click.
+    try {
+      if (this.masterFinalOutputTrim) {
+        this.masterFinalOutputTrim.volume.cancelScheduledValues(Tone.now())
+        this.masterFinalOutputTrim.mute = true
+      }
+    } catch {
+      // Output may already be torn down; ignore.
+    }
+
+    // 2. Dispose metronome graph (its nodes point at the master limiter we are about to drop).
+    this.disposeMetronomeChain()
+
+    // 3. Dispose the drone graph + master stage. disposeForDiagnostics() first calls
+    //    stopForLifecycle() (cancels ramps/timers, zeros voice gains), then disposes every node
+    //    and sets isReady=false / hasStarted=false / voices=[] / masterChainReady=false.
+    this.disposeForDiagnostics()
+
+    audioDiag('hard-reset', `end (${reason})`, { contextState: this.getContextState() })
+  }
+
+  // Dispose the metronome signal chain and reset its build latch so the next startMetronome()
+  // rebuilds fresh nodes (the old ones were wired to a now-disposed master limiter).
+  disposeMetronomeChain() {
+    this.stopMetronome()
+
+    const nodes = [
+      this.metronomeFallbackOsc,
+      this.metronomeFallbackVolume,
+      this.metronomeTrim,
+      this.metronomePresenceEq,
+      this.metronomeClickEq,
+      this.metronomeSoftClip,
+      this.metronomeGain,
+    ]
+
+    Object.values(this.metronomePlayerPools ?? {}).forEach((players) => {
+      players?.forEach((player) => nodes.push(player))
+    })
+
+    nodes.forEach((node) => {
+      try {
+        node?.dispose()
+      } catch {
+        // Partial teardown is fine; we null everything below.
+      }
+    })
+
+    this.metronomePlayerPools = null
+    this.metronomeTrim = null
+    this.metronomePresenceEq = null
+    this.metronomeClickEq = null
+    this.metronomeSoftClip = null
+    this.metronomeGain = null
+    this.metronomeFallbackOsc = null
+    this.metronomeFallbackVolume = null
+    this.metronomeUsesSampleFallback = false
+    this.metronomeChainReady = null
   }
 
   // Lifecycle-only AudioContext wake — does not start playback, rebuild voices, or retune.
@@ -11115,6 +11203,12 @@ export class DroneEngine {
 
   async startMetronome(bpm = this.metronomeBpm) {
     audioDiag('metronome-engine', 'startMetronome begin', { contextState: this.getContextState() })
+    // iOS only: re-assert AVAudioSession `.playback` natively before WebAudio starts so the
+    // metronome ignores the Ring/Silent switch too. No-op on web/Android.
+    await configureNativePlaybackSession('metronome-start')
+    audioDiag('metronome-engine', 'context state after native session call', {
+      contextState: this.getContextState(),
+    })
     await Tone.start()
     await this.resumeContextIfNeeded()
     this.ensureContextStateWatcher()
