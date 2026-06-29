@@ -8757,6 +8757,7 @@ export class DroneEngine {
     return {
       metronomePlaying: this.metronomePlaying === true,
       schedulerActive: Boolean(this.metronomeTimer),
+      beatsScheduled: this.metronomeBeatsScheduledTotal ?? 0,
       primerPlaying: isPrimerPlaying(),
       contextState: this.getContextState(),
       metronomeChainReady: this.metronomeChainReady == null ? 'null' : typeof this.metronomeChainReady,
@@ -11083,6 +11084,19 @@ export class DroneEngine {
     volumeParam.setValueAtTime(targetDb + METRONOME_ATTACK_SOFTENING_DB, time)
     volumeParam.linearRampToValueAtTime(targetDb, time + METRONOME_ATTACK_RAMP_SECONDS)
     volumeParam.exponentialRampToValueAtTime(-100, time + 0.045)
+
+    this.metronomeBeatsScheduledTotal = (this.metronomeBeatsScheduledTotal ?? 0) + 1
+
+    // Temporary debug: prove the oscillator click is actually scheduled (first few only).
+    if ((this.metronomeClickLogCount ?? 0) < 8) {
+      this.metronomeClickLogCount = (this.metronomeClickLogCount ?? 0) + 1
+      audioDiag('metronome-tick', 'metronome oscillator click started', {
+        beat: this.metronomeMeasureBeatIndex,
+        time: Number(time?.toFixed?.(3) ?? time),
+        contextState: this.getContextState(),
+        primerPlaying: isPrimerPlaying(),
+      })
+    }
   }
 
   activateMetronomeSampleFallback(reason, details = {}) {
@@ -11090,6 +11104,36 @@ export class DroneEngine {
     this.ensureMetronomeFallbackClick()
     audioDiag('metronome-samples', `using oscillator fallback (${reason})`, details)
     console.warn('[Moondrone metronome] Using oscillator fallback click', { reason, ...details })
+  }
+
+  // Build the metronome EQ/trim/gain processing nodes once and wire them into the master
+  // limiter (the same audible output path the drone uses). Idempotent.
+  buildMetronomeProcessingChain() {
+    if (this.metronomeTrim) {
+      return
+    }
+
+    this.ensureMasterOutput()
+    this.metronomeTrim = new Tone.Volume(METRONOME_TRIM_DB)
+    this.metronomeSoftClip = this.createMetronomeSoftClipper()
+    this.metronomePresenceEq = new Tone.Filter({
+      type: 'peaking',
+      frequency: METRONOME_PRESENCE_FREQUENCY,
+      Q: METRONOME_PRESENCE_Q,
+      gain: METRONOME_PRESENCE_GAIN_DB,
+    })
+    this.metronomeClickEq = new Tone.Filter({
+      type: 'peaking',
+      frequency: METRONOME_CLICK_FREQUENCY,
+      Q: METRONOME_CLICK_Q,
+      gain: METRONOME_CLICK_GAIN_DB,
+    })
+    this.metronomeGain = new Tone.Volume(METRONOME_OUTPUT_DB)
+    this.metronomeTrim.connect(this.metronomePresenceEq)
+    this.metronomePresenceEq.connect(this.metronomeClickEq)
+    this.metronomeClickEq.connect(this.metronomeSoftClip)
+    this.metronomeSoftClip.connect(this.metronomeGain)
+    this.metronomeGain.connect(this.masterLimiter)
   }
 
   async ensureMetronomeChain() {
@@ -11100,6 +11144,20 @@ export class DroneEngine {
 
     audioDiag('metronome-engine', 'ensureMetronomeChain → building fresh chain')
     this.metronomeChainReady = (async () => {
+      // iOS native (Capacitor WKWebView): sample loading from capacitor://localhost reliably
+      // FAILS and churns the AVAudioSession mid-startup (the real cause of "one click then
+      // silence"). Bypass the entire sample path — no preflight, no Tone.Player, no Tone.loaded()
+      // — and use the oscillator click as the PRIMARY iOS metronome engine.
+      if (isIosNative()) {
+        this.buildMetronomeProcessingChain()
+        this.metronomePlayerPools = null
+        this.activateMetronomeSampleFallback('ios-oscillator-primary')
+        audioDiag('metronome-engine', 'iOS metronome using oscillator primary', {
+          contextState: this.getContextState(),
+        })
+        return
+      }
+
       try {
         audioDiag('metronome-engine', 'metronome chain: sample URLs', {
           urls: Object.fromEntries(
@@ -11119,27 +11177,7 @@ export class DroneEngine {
         )
         audioDiag('metronome-engine', 'metronome chain: samples verified, building nodes')
 
-        this.ensureMasterOutput()
-        this.metronomeTrim = new Tone.Volume(METRONOME_TRIM_DB)
-        this.metronomeSoftClip = this.createMetronomeSoftClipper()
-        this.metronomePresenceEq = new Tone.Filter({
-          type: 'peaking',
-          frequency: METRONOME_PRESENCE_FREQUENCY,
-          Q: METRONOME_PRESENCE_Q,
-          gain: METRONOME_PRESENCE_GAIN_DB,
-        })
-        this.metronomeClickEq = new Tone.Filter({
-          type: 'peaking',
-          frequency: METRONOME_CLICK_FREQUENCY,
-          Q: METRONOME_CLICK_Q,
-          gain: METRONOME_CLICK_GAIN_DB,
-        })
-        this.metronomeGain = new Tone.Volume(METRONOME_OUTPUT_DB)
-        this.metronomeTrim.connect(this.metronomePresenceEq)
-        this.metronomePresenceEq.connect(this.metronomeClickEq)
-        this.metronomeClickEq.connect(this.metronomeSoftClip)
-        this.metronomeSoftClip.connect(this.metronomeGain)
-        this.metronomeGain.connect(this.masterLimiter)
+        this.buildMetronomeProcessingChain()
         this.metronomePlayerPools = {
           blockHigh: [this.createMetronomePlayer(METRONOME_SAMPLE_URLS.blockHigh)],
           blockLow: [this.createMetronomePlayer(METRONOME_SAMPLE_URLS.blockLow)],
@@ -11180,33 +11218,7 @@ export class DroneEngine {
         })
 
         try {
-          if (!this.masterChainReady) {
-            this.ensureMasterOutput()
-          }
-
-          if (!this.metronomeTrim) {
-            this.metronomeTrim = new Tone.Volume(METRONOME_TRIM_DB)
-            this.metronomeSoftClip = this.createMetronomeSoftClipper()
-            this.metronomePresenceEq = new Tone.Filter({
-              type: 'peaking',
-              frequency: METRONOME_PRESENCE_FREQUENCY,
-              Q: METRONOME_PRESENCE_Q,
-              gain: METRONOME_PRESENCE_GAIN_DB,
-            })
-            this.metronomeClickEq = new Tone.Filter({
-              type: 'peaking',
-              frequency: METRONOME_CLICK_FREQUENCY,
-              Q: METRONOME_CLICK_Q,
-              gain: METRONOME_CLICK_GAIN_DB,
-            })
-            this.metronomeGain = new Tone.Volume(METRONOME_OUTPUT_DB)
-            this.metronomeTrim.connect(this.metronomePresenceEq)
-            this.metronomePresenceEq.connect(this.metronomeClickEq)
-            this.metronomeClickEq.connect(this.metronomeSoftClip)
-            this.metronomeSoftClip.connect(this.metronomeGain)
-            this.metronomeGain.connect(this.masterLimiter)
-          }
-
+          this.buildMetronomeProcessingChain()
           this.metronomePlayerPools = null
           this.activateMetronomeSampleFallback('chain-build-error', {
             message: error?.message ?? String(error),
@@ -11401,8 +11413,25 @@ export class DroneEngine {
       return
     }
 
+    this.metronomeSchedulerTickCount = 0
+
     const tick = () => {
+      this.metronomeSchedulerTickCount += 1
       this.scheduleMetronomeBeats()
+
+      // Temporary debug: prove the repeating callback is actually firing (first few only).
+      if ((this.metronomeTickLogCount ?? 0) < 8) {
+        this.metronomeTickLogCount = (this.metronomeTickLogCount ?? 0) + 1
+        audioDiag('metronome-tick', 'metronome tick fired', {
+          tick: this.metronomeSchedulerTickCount,
+          beat: this.metronomeMeasureBeatIndex,
+          contextState: this.getContextState(),
+          currentTime: Number(Tone.now().toFixed(3)),
+          primerPlaying: isPrimerPlaying(),
+          schedulerActive: Boolean(this.metronomeTimer),
+          beatsScheduledTotal: this.metronomeBeatsScheduledTotal ?? 0,
+        })
+      }
     }
 
     this.metronomeTimer = window.setInterval(tick, METRONOME_SCHEDULE_INTERVAL_MS)
@@ -11639,11 +11668,12 @@ export class DroneEngine {
     this.fillMetronomeScheduleUntil(now + METRONOME_LOOKAHEAD_SECONDS, now)
   }
 
-  async startMetronome(bpm = this.metronomeBpm, { operationToken = null } = {}) {
+  async startMetronome(bpm = this.metronomeBpm, { operationToken = null, skipNativeReconfigure = false } = {}) {
     this.metronomeStartOperationToken = operationToken
     audioDiag('metronome-engine', 'startMetronome ENTER', {
       ...this.getMetronomeDiagnostics(),
       operationToken,
+      skipNativeReconfigure,
     })
 
     const assertCurrent = (phase) => {
@@ -11667,13 +11697,21 @@ export class DroneEngine {
 
     // Now that the context exists, re-assert AVAudioSession `.playback` natively so the metronome
     // ignores the Ring/Silent switch (WKWebView can reset the session on context init). No-op off iOS.
-    audioDiag('metronome-engine', 'before configureNativePlaybackSession')
-    const sessionState = await configureNativePlaybackSession('metronome-post-context')
-    assertCurrent('after-native-session')
-    audioDiag('metronome-engine', 'after configureNativePlaybackSession', {
-      sessionState,
-      contextState: this.getContextState(),
-    })
+    // When the drone is already playing on a running context, skip this — reconfiguring the native
+    // session can emit an interruption that disrupts the live drone.
+    if (skipNativeReconfigure) {
+      audioDiag('metronome-engine', 'skipping native session reconfigure (drone already running)', {
+        contextState: this.getContextState(),
+      })
+    } else {
+      audioDiag('metronome-engine', 'before configureNativePlaybackSession')
+      const sessionState = await configureNativePlaybackSession('metronome-post-context')
+      assertCurrent('after-native-session')
+      audioDiag('metronome-engine', 'after configureNativePlaybackSession', {
+        sessionState,
+        contextState: this.getContextState(),
+      })
+    }
 
     this.metronomeBpm = this.clamp(bpm, MIN_METRONOME_BPM, MAX_METRONOME_BPM)
 
@@ -11720,11 +11758,15 @@ export class DroneEngine {
     this.metronomePlaying = true
     this.applyDroneMetronomeHeadroom()
     this.nextMetronomeBeatTime = Tone.now() + 0.05
+    this.metronomeBeatsScheduledTotal = 0
+    this.metronomeClickLogCount = 0
+    this.metronomeTickLogCount = 0
     this.primeMetronomeSchedule(METRONOME_TRANSITION_PRIME_SECONDS)
     audioDiag('metronome-engine', 'before startMetronomeScheduler()', {
       contextState: this.getContextState(),
       primer: getPrimerDebugState(),
       primerPlaying: isPrimerPlaying(),
+      beatsScheduled: this.metronomeBeatsScheduledTotal,
     })
     this.startMetronomeScheduler()
     this.logMetronomeSchedulerStartDiagnostics()
@@ -11734,11 +11776,16 @@ export class DroneEngine {
       schedulerActive: Boolean(this.metronomeTimer),
       metronomePlaying: this.metronomePlaying,
       primerPlaying: isPrimerPlaying(),
+      beatsScheduled: this.metronomeBeatsScheduledTotal,
     })
 
-    if (this.getContextState() !== 'running' || !this.metronomeTimer || (isIosNative() && !isPrimerPlaying())) {
+    // Scheduler "reality" gate: the repeating callback must have actually scheduled at least one
+    // beat, the context must be running, and (iOS) the primer must be alive.
+    const schedulerReal = Boolean(this.metronomeTimer) && (this.metronomeBeatsScheduledTotal ?? 0) > 0
+
+    if (this.getContextState() !== 'running' || !schedulerReal || (isIosNative() && !isPrimerPlaying())) {
       this.clearMetronomeSchedulerForRestart('post-start-verify-failed')
-      throw new Error('Metronome scheduler failed to start with running context and primer')
+      throw new Error('Metronome scheduler failed to start with running context, scheduled beats, and primer')
     }
 
     return this.getMetronomeDiagnostics()

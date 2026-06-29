@@ -288,6 +288,7 @@ function App() {
     const primerOk = !isIosNative() || diag.primerPlaying === true || getPrimerDebugState().playing === true
     return diag.metronomePlaying === true
       && diag.schedulerActive === true
+      && (diag.beatsScheduled ?? 0) > 0
       && diag.contextState === 'running'
       && primerOk
   }
@@ -501,20 +502,40 @@ function App() {
     const operationToken = beginMetronomeOperation('play')
     metronomeStartPendingRef.current = true
     setMetronomePulse({ tick: 0, downbeat: false })
-    beginMediaPrimerStartup('metronome-play')
-    let guardEnded = false
+
+    // If the drone is already playing on a running context (primer already alive on iOS), start the
+    // metronome against that live session: do NOT re-prime media or reconfigure the native session,
+    // which can emit an interruption that disrupts the drone.
+    const droneAlreadyRunning = isPlaying
+      && droneEngine.getContextState?.() === 'running'
+      && (!isIosNative() || isPrimerPlaying())
+
+    if (!droneAlreadyRunning) {
+      beginMediaPrimerStartup('metronome-play')
+    }
+    let guardEnded = droneAlreadyRunning
 
     try {
-      await primeForPlayback('metronome-play')
+      if (droneAlreadyRunning) {
+        audioDiag('metronome', 'metronome start over running drone — skipping re-prime + native reconfigure', {
+          contextState: droneEngine.getContextState?.(),
+          primerPlaying: isPrimerPlaying(),
+        })
+      } else {
+        await primeForPlayback('metronome-play')
 
-      if (!isMetronomeOperationCurrent(operationToken)) {
-        audioDiag('metronome', 'stale metronome operation ignored', { phase: 'after-primeForPlayback' })
-        return
+        if (!isMetronomeOperationCurrent(operationToken)) {
+          audioDiag('metronome', 'stale metronome operation ignored', { phase: 'after-primeForPlayback' })
+          return
+        }
       }
 
       droneEngine.setMetronomeSoundMode(metronomeSoundMode)
       droneEngine.setMetronomeMeter(metronomeMeter)
-      await droneEngine.startMetronome(metronomeBpm, { operationToken })
+      await droneEngine.startMetronome(metronomeBpm, {
+        operationToken,
+        skipNativeReconfigure: droneAlreadyRunning,
+      })
 
       if (!isMetronomeOperationCurrent(operationToken)) {
         audioDiag('metronome', 'stale metronome operation ignored', { phase: 'after-startMetronome' })
@@ -524,17 +545,20 @@ function App() {
 
       if (!isMetronomeEngineReady()) {
         droneEngine.stopMetronome()
-        throw new Error('Metronome failed — context, scheduler, or primer not ready after start')
+        throw new Error('Metronome failed — context, scheduler, beats, or primer not ready after start')
       }
 
       audioDiag('metronome', 'startMetronome resolved — setting UI isMetronomePlaying=true', {
         uiIsMetronomePlayingBefore: isMetronomePlaying,
         operationToken,
+        droneAlreadyRunning,
         ...droneEngine.getMetronomeDiagnostics?.(),
         primer: getPrimerDebugState(),
       })
       setIsMetronomePlaying(true)
-      endMediaPrimerStartup('metronome-play-success')
+      if (!droneAlreadyRunning) {
+        endMediaPrimerStartup('metronome-play-success')
+      }
       guardEnded = true
       audioDiag('metronome', 'handleMetronomePlay complete — UI AFTER setState(true) requested', {
         note: 'React state updates on next render; panel shows live uiIsMetronomePlaying',
@@ -550,13 +574,16 @@ function App() {
         uiIsMetronomePlaying,
         operationToken,
         shouldCleanup,
+        droneAlreadyRunning,
         ...droneEngine.getMetronomeDiagnostics?.(),
         primer: getPrimerDebugState(),
       })
       console.error('[Moondrone metronome] start failed', error)
       droneEngine.stopMetronome()
       setIsMetronomePlaying(false)
-      endMediaPrimerStartup('metronome-play-failed', { immediate: true })
+      if (!droneAlreadyRunning) {
+        endMediaPrimerStartup('metronome-play-failed', { immediate: true })
+      }
       guardEnded = true
       if (!isPlaying && shouldCleanup) {
         pausePrimer('metronome-play-failed', { force: true })
