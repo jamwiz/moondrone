@@ -130,6 +130,7 @@ function App() {
   const [volume, setVolume] = useState(DEFAULT_MASTER_VOLUME)
   const [binauralModeId, setBinauralModeId] = useState(DEFAULT_BINAURAL_MODE_ID)
   const [isPlaying, setIsPlaying] = useState(false)
+  const [isDroneStarting, setIsDroneStarting] = useState(false)
   const [metronomeBpm, setMetronomeBpm] = useState(DEFAULT_METRONOME_BPM)
   const [metronomeSoundMode, setMetronomeSoundMode] = useState(DEFAULT_METRONOME_SOUND_MODE)
   const [metronomeMeter, setMetronomeMeter] = useState(DEFAULT_METRONOME_METER)
@@ -163,6 +164,7 @@ function App() {
 
       if (wasPlaying) {
         setIsPlaying(false)
+        setIsDroneStarting(false)
       }
 
       if (wasMetronomePlaying) {
@@ -274,13 +276,31 @@ function App() {
     audioDiag('media-primer', `primeForPlayback END (${reason})`, getPrimerDebugState())
   }
 
-  async function handlePlay() {
-    if (isPlaying || isStartingRef.current) {
+  function isMetronomeEngineReady() {
+    const diag = droneEngine.getMetronomeDiagnostics?.() ?? {}
+    return diag.metronomePlaying === true
+      && diag.schedulerActive === true
+      && diag.contextState === 'running'
+  }
+
+  function handlePlayPointerDown() {
+    if (isPlaying || isDroneStarting || isStartingRef.current) {
       return
     }
 
+    setIsDroneStarting(true)
+  }
+
+  async function handlePlay() {
+    if (isPlaying || isStartingRef.current) {
+      setIsDroneStarting(false)
+      return
+    }
+
+    setIsDroneStarting(true)
     isStartingRef.current = true
     beginMediaPrimerStartup('drone-play')
+    let guardEnded = false
 
     try {
       audioDiag('drone', 'handlePlay ENTER')
@@ -294,24 +314,33 @@ function App() {
       }
 
       setIsPlaying(true)
+      setIsDroneStarting(false)
       endMediaPrimerStartup('drone-play-success')
+      guardEnded = true
     } catch (error) {
       audioDiag('drone', 'handlePlay failed', { message: error?.message ?? String(error) })
       setIsPlaying(false)
+      setIsDroneStarting(false)
       endMediaPrimerStartup('drone-play-failed', { immediate: true })
+      guardEnded = true
       if (!isMetronomePlaying) {
         pausePrimer('drone-play-failed', { force: true })
       }
     } finally {
+      if (!guardEnded && isMediaPrimerStartupActive()) {
+        endMediaPrimerStartup('drone-play-finally-fallback', { immediate: true })
+      }
       isStartingRef.current = false
     }
   }
 
   function handleStop() {
     if (!isPlaying) {
+      setIsDroneStarting(false)
       return
     }
 
+    setIsDroneStarting(false)
     droneEngine.stop()
     setIsPlaying(false)
 
@@ -338,6 +367,7 @@ function App() {
 
     isStartingRef.current = true
     beginMediaPrimerStartup('drone-key-change-start')
+    let guardEnded = false
 
     try {
       await primeForPlayback('drone-key-change-start')
@@ -351,14 +381,19 @@ function App() {
 
       setIsPlaying(true)
       endMediaPrimerStartup('drone-key-change-start-success')
+      guardEnded = true
     } catch (error) {
       audioDiag('drone', 'handleKeyChange start failed', { message: error?.message ?? String(error) })
       setIsPlaying(false)
       endMediaPrimerStartup('drone-key-change-failed', { immediate: true })
+      guardEnded = true
       if (!isMetronomePlaying) {
         pausePrimer('drone-key-change-failed', { force: true })
       }
     } finally {
+      if (!guardEnded && isMediaPrimerStartupActive()) {
+        endMediaPrimerStartup('drone-key-change-finally-fallback', { immediate: true })
+      }
       isStartingRef.current = false
     }
   }
@@ -449,6 +484,7 @@ function App() {
 
     setMetronomePulse({ tick: 0, downbeat: false })
     beginMediaPrimerStartup('metronome-play')
+    let guardEnded = false
 
     try {
       await primeForPlayback('metronome-play')
@@ -456,31 +492,38 @@ function App() {
       droneEngine.setMetronomeMeter(metronomeMeter)
       await droneEngine.startMetronome(metronomeBpm)
 
-      const contextOk = await ensureContextRunningAfterStart('metronome-play')
-      if (!contextOk) {
-        throw new Error('AudioContext not running after metronome start')
+      if (!isMetronomeEngineReady()) {
+        droneEngine.stopMetronome()
+        throw new Error('Metronome failed — context or scheduler not ready after start')
       }
 
       audioDiag('metronome', 'startMetronome resolved — setting UI isMetronomePlaying=true', {
         uiIsMetronomePlayingBefore: isMetronomePlaying,
-        engineMetronomePlaying: droneEngine.getMetronomeDiagnostics?.()?.metronomePlaying,
-        contextState: droneEngine.getContextState?.() ?? 'unknown',
+        ...droneEngine.getMetronomeDiagnostics?.(),
       })
       setIsMetronomePlaying(true)
       endMediaPrimerStartup('metronome-play-success')
+      guardEnded = true
       audioDiag('metronome', 'handleMetronomePlay complete — UI AFTER setState(true) requested', {
         note: 'React state updates on next render; panel shows live uiIsMetronomePlaying',
       })
     } catch (error) {
-      audioDiag('metronome', 'handleMetronomePlay FAILED — startMetronome threw', {
+      audioDiag('metronome', 'handleMetronomePlay FAILED — metronome start failed', {
         message: error?.message ?? String(error),
         uiIsMetronomePlaying,
+        ...droneEngine.getMetronomeDiagnostics?.(),
       })
       console.error('[Moondrone metronome] start failed', error)
+      droneEngine.stopMetronome()
       setIsMetronomePlaying(false)
       endMediaPrimerStartup('metronome-play-failed', { immediate: true })
+      guardEnded = true
       if (!isPlaying) {
         pausePrimer('metronome-play-failed', { force: true })
+      }
+    } finally {
+      if (!guardEnded && isMediaPrimerStartupActive()) {
+        endMediaPrimerStartup('metronome-play-finally-fallback', { immediate: true })
       }
     }
   }
@@ -550,11 +593,11 @@ function App() {
 
         <header className="app-header">
           <span
-            className={isPlaying ? 'status-indicator active' : 'status-indicator'}
+            className={isPlaying || isDroneStarting ? 'status-indicator active' : 'status-indicator'}
             aria-live="polite"
           >
             <span className="status-dot" aria-hidden="true" />
-            {isPlaying ? 'Drone Active' : 'Ready'}
+            {isPlaying ? 'Drone Active' : isDroneStarting ? 'Starting…' : 'Ready'}
           </span>
 
           <div className="header-actions">
@@ -614,9 +657,23 @@ function App() {
 
             <button
               type="button"
-              className={isPlaying ? 'moon-orb playing' : 'moon-orb'}
-              aria-label={isPlaying ? 'Drone active. Stop drone' : 'Play drone'}
+              className={
+                isPlaying
+                  ? 'moon-orb playing'
+                  : isDroneStarting
+                    ? 'moon-orb starting'
+                    : 'moon-orb'
+              }
+              aria-label={
+                isPlaying
+                  ? 'Drone active. Stop drone'
+                  : isDroneStarting
+                    ? 'Starting drone'
+                    : 'Play drone'
+              }
               aria-pressed={isPlaying}
+              aria-busy={isDroneStarting}
+              onPointerDown={!isPlaying ? handlePlayPointerDown : undefined}
               onClick={isPlaying ? handleStop : handlePlay}
             >
               <span className="moon-orb-glow" aria-hidden="true" />

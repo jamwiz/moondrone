@@ -167,7 +167,7 @@ export async function ensurePrimerPlaying(reason = 'play') {
 // During media-primer startup, pauses are skipped unless force=true.
 export function pausePrimer(reason = 'idle', { force = false } = {}) {
   if (!force && isMediaPrimerStartupActive()) {
-    audioDiag('media-primer', `primer kept alive during startup (pause skipped: ${reason})`)
+    audioDiag('media-primer', 'primer kept alive during startup', { pauseSkippedReason: reason })
     return
   }
 

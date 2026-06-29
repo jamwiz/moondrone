@@ -405,6 +405,25 @@
   transition: transform 220ms ease;
 }
 
+.moon-orb.starting {
+  transform: translate(-50%, -50%) scale(0.99);
+}
+
+.moon-orb.starting .moon-orb-glow {
+  animation: moon-starting-pulse 900ms ease-in-out infinite;
+}
+
+@keyframes moon-starting-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+
+  50% {
+    opacity: 0.8;
+  }
+}
+
 @media (hover: hover) {
   .moon-orb:hover {
     transform: translate(-50%, -50%) scale(1.02);
