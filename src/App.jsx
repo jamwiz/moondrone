@@ -348,12 +348,15 @@ function App() {
   }
 
   async function handleMetronomePlay() {
-    audioDiag('metronome', 'handleMetronomePlay invoked', {
-      alreadyPlaying: isMetronomePlaying,
-      contextState: droneEngine.getContextState?.() ?? 'unknown',
+    audioDiag('metronome', 'handleMetronomePlay invoked (reached App handler)', {
+      uiIsMetronomePlaying: isMetronomePlaying,
+      ...droneEngine.getMetronomeDiagnostics?.(),
     })
 
     if (isMetronomePlaying) {
+      audioDiag('metronome', 'handleMetronomePlay EARLY RETURN — UI thinks metronome already playing', {
+        engineMetronomePlaying: droneEngine.getMetronomeDiagnostics?.()?.metronomePlaying,
+      })
       return
     }
 

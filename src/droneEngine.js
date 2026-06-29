@@ -490,19 +490,22 @@ export class DroneEngine {
       this.currentKey = key
       this.currentOctave = octave
 
-      // iOS only: re-assert AVAudioSession `.playback` natively BEFORE WebAudio starts, so audio
-      // ignores the Ring/Silent switch. AppDelegate launch setup alone is not enough — WKWebView
-      // can reset the shared session when the context is first created. No-op on web/Android.
-      audioDiag('drone-engine', 'drone Play pressed', { contextState: this.getContextState() })
-      await configureNativePlaybackSession('drone-start')
-      audioDiag('drone-engine', 'context state after native session call', {
+      // Browsers require Tone.start() to run from the Play button gesture before nodes are created.
+      // Do it FIRST (iOS): awaiting the native bridge before Tone.start() can consume the user
+      // gesture's activation window and leave the context suspended.
+      audioDiag('drone-engine', 'drone Play pressed — before Tone.start()', {
         contextState: this.getContextState(),
       })
-
-      // Browsers require Tone.start() to run from the Play button gesture before nodes are created.
       await Tone.start()
       await this.resumeContextIfNeeded()
       this.ensureContextStateWatcher()
+
+      // Now that the context exists, re-assert AVAudioSession `.playback` natively so audio ignores
+      // the Ring/Silent switch (WKWebView can reset the session on context init). No-op off iOS.
+      await configureNativePlaybackSession('drone-post-context')
+      audioDiag('drone-engine', 'context state after post-context native session call', {
+        contextState: this.getContextState(),
+      })
 
       if (!this.isStarting) {
         return
@@ -8741,6 +8744,20 @@ export class DroneEngine {
     return Tone.getContext().rawContext.state
   }
 
+  // Snapshot of metronome-relevant state for tap-time diagnostics (read from the UI handler).
+  // metronomeChainReady is a Promise|null, so we report its type rather than the object itself.
+  getMetronomeDiagnostics() {
+    return {
+      metronomePlaying: this.metronomePlaying === true,
+      contextState: this.getContextState(),
+      metronomeChainReady: this.metronomeChainReady == null ? 'null' : typeof this.metronomeChainReady,
+      metronomeChainReadyTruthy: !!this.metronomeChainReady,
+      isReady: this.isReady === true,
+      masterChainReady: this.masterChainReady === true,
+      isStarting: this.isStarting === true,
+    }
+  }
+
   // Attach once. Watches the raw AudioContext for the iOS-only "interrupted" state
   // (phone call, another app taking audio focus, Siri). On a genuine interruption we
   // reset playback cleanly and notify the UI — we do NOT auto-resume or fight for focus.
@@ -10931,14 +10948,18 @@ export class DroneEngine {
 
   async ensureMetronomeChain() {
     if (this.metronomeChainReady) {
+      audioDiag('metronome-engine', 'ensureMetronomeChain → reusing existing chain (no rebuild)')
       return this.metronomeChainReady
     }
 
+    audioDiag('metronome-engine', 'ensureMetronomeChain → building fresh chain')
     this.metronomeChainReady = (async () => {
       try {
+        audioDiag('metronome-engine', 'metronome chain: verifying samples')
         await Promise.all(
           METRONOME_SAMPLE_IDS.map((sampleId) => this.verifyMetronomeSampleUrl(METRONOME_SAMPLE_URLS[sampleId])),
         )
+        audioDiag('metronome-engine', 'metronome chain: samples verified, building nodes')
 
         this.ensureMasterOutput()
         this.metronomeTrim = new Tone.Volume(METRONOME_TRIM_DB)
@@ -10983,8 +11004,14 @@ export class DroneEngine {
         } else {
           this.metronomeUsesSampleFallback = false
         }
+        audioDiag('metronome-engine', 'metronome chain: build complete', {
+          usesSampleFallback: this.metronomeUsesSampleFallback === true,
+        })
       } catch (error) {
         this.metronomeChainReady = null
+        audioDiag('metronome-engine', 'metronome chain: BUILD FAILED', {
+          message: error?.message ?? String(error),
+        })
         console.error('[Moondrone metronome] Metronome chain setup failed', {
           message: error?.message ?? String(error),
           error,
@@ -11202,27 +11229,40 @@ export class DroneEngine {
   }
 
   async startMetronome(bpm = this.metronomeBpm) {
-    audioDiag('metronome-engine', 'startMetronome begin', { contextState: this.getContextState() })
-    // iOS only: re-assert AVAudioSession `.playback` natively before WebAudio starts so the
-    // metronome ignores the Ring/Silent switch too. No-op on web/Android.
-    await configureNativePlaybackSession('metronome-start')
-    audioDiag('metronome-engine', 'context state after native session call', {
+    audioDiag('metronome-engine', 'startMetronome ENTER', this.getMetronomeDiagnostics())
+
+    // IMPORTANT (iOS): resume the WebAudio context FIRST, while we are still inside the user
+    // gesture's activation window. Awaiting the native bridge before Tone.start() can consume
+    // the transient activation and leave the context suspended (silent metronome).
+    audioDiag('metronome-engine', 'before Tone.start()', { contextState: this.getContextState() })
+    await Tone.start()
+    audioDiag('metronome-engine', 'after Tone.start()', { contextState: this.getContextState() })
+    await this.resumeContextIfNeeded()
+    audioDiag('metronome-engine', 'after resumeContextIfNeeded()', { contextState: this.getContextState() })
+    this.ensureContextStateWatcher()
+
+    // Now that the context exists, re-assert AVAudioSession `.playback` natively so the metronome
+    // ignores the Ring/Silent switch (WKWebView can reset the session on context init). No-op off iOS.
+    audioDiag('metronome-engine', 'before configureNativePlaybackSession')
+    const sessionState = await configureNativePlaybackSession('metronome-post-context')
+    audioDiag('metronome-engine', 'after configureNativePlaybackSession', {
+      sessionState,
       contextState: this.getContextState(),
     })
-    await Tone.start()
-    await this.resumeContextIfNeeded()
-    this.ensureContextStateWatcher()
-    audioDiag('metronome-engine', 'context ready', { contextState: this.getContextState() })
+
     this.metronomeBpm = this.clamp(bpm, MIN_METRONOME_BPM, MAX_METRONOME_BPM)
 
     if (this.metronomePlaying) {
+      audioDiag('metronome-engine', 'startMetronome EARLY RETURN — already playing')
       return
     }
 
+    audioDiag('metronome-engine', 'before ensureMetronomeChain()', this.getMetronomeDiagnostics())
     await this.ensureMetronomeChain()
-    audioDiag('metronome-engine', 'metronome chain ready', {
+    audioDiag('metronome-engine', 'after ensureMetronomeChain()', {
       usesSampleFallback: this.metronomeUsesSampleFallback === true,
     })
+
     this.metronomeActiveMeter = this.metronomeMeter
     this.metronomePendingMeter = null
     this.metronomeMeasureBeatIndex = 0
@@ -11230,7 +11270,11 @@ export class DroneEngine {
     this.applyDroneMetronomeHeadroom()
     this.nextMetronomeBeatTime = Tone.now() + 0.05
     this.primeMetronomeSchedule(METRONOME_TRANSITION_PRIME_SECONDS)
+    audioDiag('metronome-engine', 'before startMetronomeScheduler()')
     this.startMetronomeScheduler()
+    audioDiag('metronome-engine', 'startMetronome DONE — scheduler running', {
+      contextState: this.getContextState(),
+    })
   }
 
   cancelPendingMetronomeClicks() {

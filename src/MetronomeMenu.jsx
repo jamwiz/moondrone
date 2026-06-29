@@ -4,6 +4,12 @@ import {
   METRONOME_SOUND_MODES,
 } from './metronomeSamples'
 import { audioDiag } from './audioDiagnostics'
+import { droneEngine } from './droneEngine'
+
+// TEMPORARY iOS debug: shows two extra buttons in the metronome popover to isolate whether the
+// problem is UI button wiring or the engine start path. Set to false (or delete the debug row)
+// once the metronome Play button is confirmed working on device.
+const METRONOME_DEBUG_BUTTONS = true
 
 export function MetronomeMenu({
   bpm,
@@ -22,20 +28,28 @@ export function MetronomeMenu({
 
   // The Play/Stop control lives inside a popover whose close-away handler listens on the
   // document for `pointerdown`. In the iOS WKWebView a plain `onClick` is unreliable here
-  // (the synthetic click can be dropped after the touch sequence), so we activate on
-  // `pointerup`/`touchend` AND `click`, de-duplicated so a normal tap only toggles once.
+  // (the synthetic click can be dropped after the touch sequence), so we activate on the
+  // pointerdown CAPTURE phase AND `click`, de-duplicated so a normal tap only toggles once.
   function activateTransport(source) {
+    // Layer-1 diagnostic: prove the button event handler is entered, and capture the live state
+    // it's deciding on (UI isPlaying prop + engine state + context + chain-ready value).
+    audioDiag('metronome-tap', `event handler ENTERED via ${source}`, {
+      uiIsPlaying: isPlaying,
+      ...(droneEngine.getMetronomeDiagnostics?.() ?? {}),
+    })
+
     const now = Date.now()
     if (now - lastTransportActivationRef.current < 500) {
-      audioDiag('metronome-tap', 'activation deduped', { source, isPlaying })
+      audioDiag('metronome-tap', 'activation deduped (ignored)', { source, isPlaying })
       return
     }
     lastTransportActivationRef.current = now
 
-    audioDiag('metronome-tap', 'handler invoked', { source, isPlaying })
     if (isPlaying) {
+      audioDiag('metronome-tap', 'calling onStop()', { source })
       onStop()
     } else {
+      audioDiag('metronome-tap', 'calling onPlay()', { source })
       onPlay()
     }
   }
@@ -46,9 +60,20 @@ export function MetronomeMenu({
     }
 
     function handlePointerDown(event) {
-      if (containerRef.current && !containerRef.current.contains(event.target)) {
-        setIsOpen(false)
+      const container = containerRef.current
+      if (!container) {
+        return
       }
+
+      // Ignore any pointerdown that originated inside the popover (trigger button, fields, or the
+      // Play/Stop control) so the menu never closes/re-renders mid-tap and swallows the activation.
+      // composedPath() is more robust than contains() for events that start on nested SVG/spans.
+      const path = typeof event.composedPath === 'function' ? event.composedPath() : []
+      if (container.contains(event.target) || path.includes(container)) {
+        return
+      }
+
+      setIsOpen(false)
     }
 
     function handleKeyDown(event) {
@@ -160,22 +185,61 @@ export function MetronomeMenu({
             // touch-action: manipulation removes the iOS double-tap delay and keeps the
             // tap from being swallowed as a gesture inside the WKWebView popover.
             style={{ touchAction: 'manipulation' }}
-            // Stop the tap from reaching the document close-away handler so the popover
-            // cannot close/re-render mid-tap and swallow the activation on iOS.
-            onPointerDown={(event) => {
+            // Primary path: act on the CAPTURE phase of pointerdown — the earliest possible point,
+            // before the document close-away handler or any re-render can interfere. preventDefault
+            // + stopPropagation keep the tap from bubbling to the close-away listener and from
+            // generating a competing click. onClick stays as a deduped fallback (desktop / a11y).
+            onPointerDownCapture={(event) => {
+              event.preventDefault()
               event.stopPropagation()
-              audioDiag('metronome-tap', 'pointerdown', { isPlaying })
+              audioDiag('metronome-tap', 'pointerdowncapture', { isPlaying })
+              activateTransport('pointerdowncapture')
             }}
-            onPointerUp={(event) => {
-              event.stopPropagation()
-              activateTransport('pointerup')
-            }}
-            onTouchEnd={() => activateTransport('touchend')}
             onClick={() => activateTransport('click')}
             aria-label={isPlaying ? 'Stop metronome' : 'Start metronome'}
           >
             {isPlaying ? 'Stop' : 'Play'}
           </button>
+
+          {METRONOME_DEBUG_BUTTONS ? (
+            <div
+              style={{ display: 'flex', gap: '8px', marginTop: '10px' }}
+              aria-label="Metronome debug"
+            >
+              {/* Proves the UI/touch wiring works at all (no engine involved). */}
+              <button
+                type="button"
+                style={{ flex: 1, minHeight: '40px', touchAction: 'manipulation', fontSize: '0.8rem' }}
+                onPointerDownCapture={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  audioDiag('metronome-test', 'TEST TAP works (pointerdowncapture)', {
+                    ...(droneEngine.getMetronomeDiagnostics?.() ?? {}),
+                  })
+                }}
+                onClick={() => audioDiag('metronome-test', 'TEST TAP works (click)')}
+              >
+                test tap
+              </button>
+
+              {/* Calls the real metronome start path directly, bypassing activateTransport/dedupe,
+                  so we can tell whether the engine start works independently of the toggle wiring. */}
+              <button
+                type="button"
+                style={{ flex: 1, minHeight: '40px', touchAction: 'manipulation', fontSize: '0.8rem' }}
+                onPointerDownCapture={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  audioDiag('metronome-test', 'TEST START → calling onPlay() directly', {
+                    ...(droneEngine.getMetronomeDiagnostics?.() ?? {}),
+                  })
+                  onPlay()
+                }}
+              >
+                test start
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>
