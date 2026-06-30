@@ -365,6 +365,9 @@ export class DroneEngine {
     // Set when a background/lifecycle stop occurs so the next start() logs that it is taking the
     // normal safe foreground startup path (background audio is intentionally not kept alive).
     this.lifecycleStopPendingPlay = false
+    // Guards the graceful lifecycle stop so duplicate inactive/hidden/pagehide events do not
+    // double-teardown. Reset after the deferred teardown completes.
+    this.lifecycleStopInProgress = false
     this.noteCrossfadeEndsAt = 0
     this.noteCrossfadeTimeoutIds = []
     // Each in-flight crossfade's outgoing voices get their own dispose timer here
@@ -12421,9 +12424,18 @@ export class DroneEngine {
     const wasPlaying = this.isPlaying
     const wasMetronomePlaying = this.metronomePlaying
 
-    if (!wasPlaying && !wasMetronomePlaying) {
+    // Idempotent: duplicate inactive/hidden/pagehide events must not double-teardown. If a stop is
+    // already in progress, or there is genuinely nothing to stop, skip.
+    if (this.lifecycleStopInProgress || (!wasPlaying && !wasMetronomePlaying)) {
+      audioDiag('lifecycle', 'lifecycle graceful stop skipped — already stopped/in progress', {
+        lifecycleStopInProgress: this.lifecycleStopInProgress === true,
+        wasPlaying,
+        wasMetronomePlaying,
+      })
       return { wasPlaying, wasMetronomePlaying }
     }
+
+    this.lifecycleStopInProgress = true
 
     audioDiag('lifecycle', 'background audio disabled — graceful stop begin', {
       wasPlaying,
@@ -12431,28 +12443,49 @@ export class DroneEngine {
       contextState: this.getContextState(),
     })
 
-    // Reflect stopped intent immediately so the next Play uses the safe foreground startup path.
+    // Mark intent stopped immediately + bump generations so any in-flight startup/recovery callback
+    // is treated as stale and cannot restore output after this lifecycle stop.
     this.isPlaying = false
     this.metronomePlaying = false
+    this.isStarting = false
     this.droneExplicitlyStopped = true
     this.lastDroneStopAt = Date.now()
     this.lifecycleStopPendingPlay = true
-
-    // Stop metronome scheduling immediately (no tick lands during the declick window) + release the
-    // click oscillator so nothing sustains.
+    this.bumpDroneOpGeneration('lifecycle-stop')
     this.metronomeStartupGeneration += 1
+
+    // Cancel stale startup/recovery timers so nothing fires mid/post teardown.
+    if (this.contextInterruptDebounceTimer) {
+      window.clearTimeout(this.contextInterruptDebounceTimer)
+      this.contextInterruptDebounceTimer = null
+    }
+    this.metronomeContextRecoveryDeadline = 0
+    this.metronomeStartupRecoveryPending = false
+    this.clearMetronomePrimerWatchdog()
+
+    // Stop metronome scheduling immediately (no tick lands during the declick) + release the click
+    // oscillator so nothing sustains.
     this.stopMetronomeScheduler()
     this.cancelPendingMetronomeClicks()
 
-    // Short declick on the audible final output before teardown so the abrupt stop cannot pop.
-    const DECLICK_SECONDS = 0.08
+    // Emergency declick: cancel scheduled automation on the final output, ramp to near-silence over
+    // ~60ms, and snap the reverb wet to 0 so no reverb tail survives the background suspension.
+    const DECLICK_SECONDS = 0.06
+    const now = Tone.now()
     if (this.masterFinalOutputTrim) {
       try {
-        const now = Tone.now()
         this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
         this.rampParam(this.masterFinalOutputTrim.volume, -60, DECLICK_SECONDS)
       } catch {
         // Output may be mid-teardown; ignore.
+      }
+    }
+    if (this.reverb?.wet) {
+      try {
+        this.reverb.wet.cancelScheduledValues(now)
+        this.reverb.wet.linearRampToValueAtTime(0, now + DECLICK_SECONDS)
+      } catch {
+        // Reverb may be mid-teardown; ignore.
       }
     }
 
@@ -12467,6 +12500,7 @@ export class DroneEngine {
           // Node may be mid-teardown; ignore.
         }
       }
+      this.lifecycleStopInProgress = false
       audioDiag('lifecycle', 'background audio disabled — graceful stop complete', {
         contextState: this.getContextState(),
       })
@@ -12496,6 +12530,10 @@ export class DroneEngine {
         // Node may be mid-teardown; ignore.
       }
     }
+
+    // Force the next Play onto the safe foreground startup path (no lightweight reuse of a stale
+    // "stable" health from before the background stop).
+    setAudioHealth(AudioHealth.UNCERTAIN, `resume-after-background-stop:${reason}`)
 
     audioDiag('lifecycle', 'background recovery timers cleared', { reason })
   }

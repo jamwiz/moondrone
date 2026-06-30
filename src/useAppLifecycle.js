@@ -124,12 +124,14 @@ function prewarmNativePlaybackSession(source) {
 }
 
 // On app resume: background audio is disabled, so the lifecycle stop already made us idle before we
-// got here. There is nothing to recover/repair — clear any stale background recovery state and do a
-// strict idle prewarm. The next user Play runs the normal safe foreground startup path.
+// got here. Do NOT prewarm the native session here — a prewarm marks Playback "recently configured"
+// and a fast Play would then skip its own media-primer-before / drone-post-context configures and
+// could be silent. Just clear stale recovery state and stay idle; the next user Play owns session
+// setup (and forces past the throttle via lifecycleStopPendingPlay).
 function handleResumeHealthCheck(source) {
   droneEngine.clearBackgroundRecoveryState?.(source)
   audioDiag('lifecycle', 'resume after background stop — idle', lifecycleSnapshot({ source }))
-  prewarmNativePlaybackSession(source)
+  audioDiag('lifecycle', 'resume prewarm skipped — waiting for user Play', { source })
 }
 
 function logBackgroundAudioResume(source, details) {

@@ -28,6 +28,18 @@ export function nativeSessionResultHasError(state) {
 const NATIVE_SESSION_THROTTLE_MS = 1500
 let lastPlaybackConfiguredAt = 0
 
+// When set (a timestamp in the future), throttled configure calls bypass the recent-Playback skip.
+// Used for the first foreground Play after a background stop: resume intentionally does NOT prewarm,
+// so the Play gesture must own session setup even though a prior configure happened "recently".
+let forcePlaybackConfigureUntil = 0
+
+// Force the next foreground configure calls (media-primer-before + drone-post-context) to bypass the
+// recent-call throttle for a short window. Default window comfortably spans prime → Tone.start →
+// post-context for one Play gesture.
+export function forceNextNativePlaybackConfigure(windowMs = 4000) {
+  forcePlaybackConfigureUntil = Date.now() + windowMs
+}
+
 export function getNativeSessionDebugState() {
   return {
     lastResult: nativeSessionDebug.lastResult,
@@ -89,8 +101,11 @@ export async function configureNativePlaybackSession(reason = 'play', { throttle
     return null
   }
 
+  const forceActive = Date.now() < forcePlaybackConfigureUntil
+
   if (
     throttle
+    && !forceActive
     && nativeSessionDebug.lastResult
     && nativeSessionDebug.lastResult.category === 'AVAudioSessionCategoryPlayback'
     && Date.now() - lastPlaybackConfiguredAt < NATIVE_SESSION_THROTTLE_MS
@@ -99,6 +114,12 @@ export async function configureNativePlaybackSession(reason = 'play', { throttle
       msSinceLast: Date.now() - lastPlaybackConfiguredAt,
     })
     return nativeSessionDebug.lastResult
+  }
+
+  if (throttle && forceActive) {
+    audioDiag('native-audio-session', `forcing native Playback session for foreground play after background stop (${reason})`, {
+      msUntilForceExpires: forcePlaybackConfigureUntil - Date.now(),
+    })
   }
 
   audioDiag('native-audio-session', `configurePlaybackSession → calling native (${reason})`)

@@ -21,7 +21,7 @@ import { useAppLifecycle } from './useAppLifecycle'
 import { getMoonStageVisualStyle } from './moonVisuals'
 import { getMoonArtworkSrc } from './moonArtwork'
 import { audioDiag } from './audioDiagnostics'
-import { addNativeAudioSessionListeners, configureNativePlaybackSession } from './nativeAudioSession'
+import { addNativeAudioSessionListeners, configureNativePlaybackSession, forceNextNativePlaybackConfigure } from './nativeAudioSession'
 import { ensurePrimerPlaying, getPrimerDebugState, isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
 import { markUserAudioAction } from './audioActivity'
 import {
@@ -386,6 +386,15 @@ function App() {
       beginMediaPrimerStartup('drone-play')
       setAudioHealth(AudioHealth.STARTING, 'drone-play')
     }
+
+    // First foreground Play after a background stop: resume intentionally did NOT prewarm, so this
+    // gesture must own the native session setup. Force the media-primer-before + drone-post-context
+    // configure calls to bypass the recent-Playback throttle (otherwise both get skipped and the
+    // drone can be silent despite a "running" context).
+    if (droneEngine.lifecycleStopPendingPlay) {
+      forceNextNativePlaybackConfigure()
+    }
+
     let guardEnded = audioAlreadyLive
 
     try {
