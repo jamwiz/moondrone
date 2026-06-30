@@ -362,10 +362,9 @@ export class DroneEngine {
     // next Play must take the safe startup path. Cleared on a clean start().
     this.droneExplicitlyStopped = false
     this.lastDroneStopAt = 0
-    // Set when an interruption is observed while the drone was intended playing (background/lock).
-    // The resume path reads this to know it must verify/repair actual output, not just trust a
-    // running context. Cleared once a post-resume output check completes.
-    this.backgroundInterruptionPending = false
+    // Set when a background/lifecycle stop occurs so the next start() logs that it is taking the
+    // normal safe foreground startup path (background audio is intentionally not kept alive).
+    this.lifecycleStopPendingPlay = false
     this.noteCrossfadeEndsAt = 0
     this.noteCrossfadeTimeoutIds = []
     // Each in-flight crossfade's outgoing voices get their own dispose timer here
@@ -517,6 +516,14 @@ export class DroneEngine {
     this.isStarting = true
     // A clean Play clears the explicit-stop gate so lightweight paths qualify again once stable.
     this.droneExplicitlyStopped = false
+
+    if (this.lifecycleStopPendingPlay) {
+      this.lifecycleStopPendingPlay = false
+      audioDiag('lifecycle', 'next foreground play after background stop — safe startup', {
+        contextState: this.getContextState(),
+      })
+    }
+
     const opToken = this.bumpDroneOpGeneration('start')
 
     // Restart-during-shutdown: Play arrived while a Stop fade-out / teardown is still pending.
@@ -9181,29 +9188,6 @@ export class DroneEngine {
         metronomePlaying: this.metronomePlaying,
         contextState: this.getContextState(),
       })
-
-      // If the drone was intended playing, remember that we must verify/repair the actual OUTPUT on
-      // resume — a running context after resume is NOT proof the speaker is fed again.
-      if (this.isPlaying) {
-        this.backgroundInterruptionPending = true
-        audioDiag('lifecycle', 'background audio interrupted — will verify output on resume', {
-          reason,
-          contextState: this.getContextState(),
-        })
-        // Soften a potential resume pop ONLY when audio clearly did not survive (context not
-        // running). Muting a frozen/suspended output avoids a stale-buffer click when it resumes;
-        // the repair path unmutes + restores level. If the context is still running (audio survived
-        // in background), leave the output untouched.
-        if (this.getContextState() !== 'running' && this.masterFinalOutputTrim) {
-          try {
-            this.masterFinalOutputTrim.volume.cancelScheduledValues(Tone.now())
-            this.masterFinalOutputTrim.mute = true
-          } catch {
-            // Output may be mid-teardown; ignore.
-          }
-        }
-      }
-
       this.scheduleContextInterruptRecovery(reason)
       return
     }
@@ -12429,164 +12413,91 @@ export class DroneEngine {
     this.applyDroneMetronomeHeadroom()
   }
 
-  // Sample the master RMS over a short window and report whether output is effectively silent.
-  // Used as the authoritative "is the drone actually audible?" signal on resume — a running context
-  // is NOT proof on iOS. Returns { silent, maxDb }. Only meaningful when the master chain is built.
-  async measureOutputSilence(durationMs = 250, floorDb = -70) {
-    if (!this.masterChainReady || !this.masterMeter) {
-      return { silent: false, maxDb: null, unknown: true }
+  // Background audio is disabled: when the app backgrounds/locks/goes inactive, stop cleanly with a
+  // short declick instead of a hard reset. Reflects "stopped" intent synchronously (so a deferred
+  // teardown frozen by iOS cannot desync resume logic), declicks the audible output, then tears the
+  // graph down via the normal lifecycle stop once it is silent. Returns { wasPlaying, wasMetronomePlaying }.
+  gracefulStopForLifecycle() {
+    const wasPlaying = this.isPlaying
+    const wasMetronomePlaying = this.metronomePlaying
+
+    if (!wasPlaying && !wasMetronomePlaying) {
+      return { wasPlaying, wasMetronomePlaying }
     }
 
-    const sampleCount = Math.max(3, Math.round(durationMs / 60))
-    const intervalMs = Math.max(30, Math.round(durationMs / sampleCount))
-    let maxDb = -Infinity
+    audioDiag('lifecycle', 'background audio disabled — graceful stop begin', {
+      wasPlaying,
+      wasMetronomePlaying,
+      contextState: this.getContextState(),
+    })
 
-    for (let i = 0; i < sampleCount; i += 1) {
-      const db = this.getMasterLevelDb()
-      if (typeof db === 'number' && Number.isFinite(db) && db > maxDb) {
-        maxDb = db
+    // Reflect stopped intent immediately so the next Play uses the safe foreground startup path.
+    this.isPlaying = false
+    this.metronomePlaying = false
+    this.droneExplicitlyStopped = true
+    this.lastDroneStopAt = Date.now()
+    this.lifecycleStopPendingPlay = true
+
+    // Stop metronome scheduling immediately (no tick lands during the declick window) + release the
+    // click oscillator so nothing sustains.
+    this.metronomeStartupGeneration += 1
+    this.stopMetronomeScheduler()
+    this.cancelPendingMetronomeClicks()
+
+    // Short declick on the audible final output before teardown so the abrupt stop cannot pop.
+    const DECLICK_SECONDS = 0.08
+    if (this.masterFinalOutputTrim) {
+      try {
+        const now = Tone.now()
+        this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
+        this.rampParam(this.masterFinalOutputTrim.volume, -60, DECLICK_SECONDS)
+      } catch {
+        // Output may be mid-teardown; ignore.
       }
-      // eslint-disable-next-line no-await-in-loop
-      await new Promise((resolve) => window.setTimeout(resolve, intervalMs))
     }
 
-    return {
-      silent: !(maxDb > floorDb),
-      maxDb: Number.isFinite(maxDb) ? Number(maxDb.toFixed(1)) : null,
-    }
+    // Tear down the graph once the declick has rendered, then restore the trim level for next Play.
+    window.setTimeout(() => {
+      this.stopForLifecycle()
+      if (this.masterFinalOutputTrim) {
+        try {
+          this.masterFinalOutputTrim.volume.cancelScheduledValues(Tone.now())
+          this.masterFinalOutputTrim.volume.value = this.getToneLabFinalOutputTrimDb()
+        } catch {
+          // Node may be mid-teardown; ignore.
+        }
+      }
+      audioDiag('lifecycle', 'background audio disabled — graceful stop complete', {
+        contextState: this.getContextState(),
+      })
+    }, 120)
+
+    return { wasPlaying, wasMetronomePlaying }
   }
 
-  // Cheap, non-destructive output repair: resume context, reassert a clean native Playback session,
-  // unmute + restore the final output trim, and re-assert the drone output level. Does NOT dispose
-  // or rebuild anything (so a live metronome is preserved).
-  async lightweightDroneOutputRepair(reason) {
-    await this.resumeContextIfNeeded()
-    await configureNativePlaybackSession(`post-resume-repair:${reason}`, { throttle: true })
+  // On resume after a background stop: clear any stale recovery timers/state and reset the final
+  // output trim so the next foreground Play starts clean. Background audio is not kept alive, so
+  // there is nothing to recover here.
+  clearBackgroundRecoveryState(reason = 'resume') {
+    if (this.contextInterruptDebounceTimer) {
+      window.clearTimeout(this.contextInterruptDebounceTimer)
+      this.contextInterruptDebounceTimer = null
+    }
+    this.contextInterruptRecoveryInFlight = false
+    this.metronomeContextRecoveryDeadline = 0
+    this.metronomeStartupRecoveryPending = false
 
     if (this.masterFinalOutputTrim) {
       try {
         this.masterFinalOutputTrim.mute = false
-        const targetDb = this.getToneLabFinalOutputTrimDb()
         this.masterFinalOutputTrim.volume.cancelScheduledValues(Tone.now())
-        this.rampParam(this.masterFinalOutputTrim.volume, targetDb, 0.03)
+        this.masterFinalOutputTrim.volume.value = this.getToneLabFinalOutputTrimDb()
       } catch {
-        // Node may be mid-teardown; the rebuild tier will handle it.
+        // Node may be mid-teardown; ignore.
       }
     }
 
-    if (this.isReady && this.output && this.masterChainReady) {
-      this.applyDroneMetronomeHeadroom()
-    }
-  }
-
-  // Requirement A/B/C: after returning from background/lock with the drone INTENDED playing, verify
-  // the drone is actually producing output and repair (or, as a last resort, rebuild) it — instead
-  // of trusting "context running + native Playback + stable health". Tiered: lightweight repair →
-  // safe rebuild → honest UI stopped.
-  async verifyAndRepairDroneOutputAfterResume(reason = 'resume') {
-    if (!this.isPlaying) {
-      this.backgroundInterruptionPending = false
-      return { intendedPlaying: false }
-    }
-
-    const nativeClean = !isIosNative() || wasLastNativeConfigureClean()
-    audioDiag('lifecycle', 'post-resume drone output check', {
-      reason,
-      contextState: this.getContextState(),
-      nativeClean,
-      isReady: this.isReady,
-      masterChainReady: this.masterChainReady,
-      outputConnected: Boolean(this.output),
-      finalTrimMuted: this.masterFinalOutputTrim?.mute === true,
-    })
-
-    // Health stays non-stable until output is verified (requirement C).
-    setAudioHealth(AudioHealth.RECOVERING, `post-resume:${reason}`)
-
-    // Undo any background-interrupt mute on the final output FIRST — otherwise the (pre-final)
-    // master meter could read signal while the speaker stays muted, masking real silence.
-    if (this.masterFinalOutputTrim?.mute === true) {
-      try {
-        this.masterFinalOutputTrim.mute = false
-        this.masterFinalOutputTrim.volume.cancelScheduledValues(Tone.now())
-        this.rampParam(this.masterFinalOutputTrim.volume, this.getToneLabFinalOutputTrimDb(), 0.03)
-        audioDiag('lifecycle', 'post-resume final output un-muted', { reason })
-      } catch {
-        // Node may be mid-teardown; the repair/rebuild tiers handle it.
-      }
-    }
-
-    const structurallyHealthy = () => this.getContextState() === 'running'
-      && this.isReady
-      && this.masterChainReady
-      && Boolean(this.output)
-
-    const first = await this.measureOutputSilence(250)
-    const cleanNow = !isIosNative() || wasLastNativeConfigureClean()
-
-    if (structurallyHealthy() && cleanNow && !first.silent) {
-      audioDiag('lifecycle', 'post-resume drone output verified — audible', { reason, maxDb: first.maxDb })
-      this.backgroundInterruptionPending = false
-      this.markAudioHealthStableSoon('post-resume-output-ok')
-      return { ok: true, repaired: false }
-    }
-
-    // Tier 1: lightweight repair.
-    audioDiag('lifecycle', 'post-resume drone output silent — attempting repair', {
-      reason,
-      maxDb: first.maxDb,
-      contextState: this.getContextState(),
-    })
-    await this.lightweightDroneOutputRepair(reason)
-
-    const second = await this.measureOutputSilence(250)
-    if (structurallyHealthy() && (!isIosNative() || wasLastNativeConfigureClean()) && !second.silent) {
-      audioDiag('lifecycle', 'post-resume drone output repair succeeded', { reason, maxDb: second.maxDb })
-      this.backgroundInterruptionPending = false
-      this.markAudioHealthStableSoon('post-resume-repair-ok')
-      return { ok: true, repaired: true }
-    }
-
-    // Tier 2: safe rebuild using retained settings (no manual stop/start required).
-    audioDiag('lifecycle', 'post-resume drone graph rebuild started', {
-      reason,
-      contextState: this.getContextState(),
-    })
-    try {
-      const key = this.currentKey
-      this.hardResetAudioGraph('post-resume-rebuild')
-      await this.start(key)
-
-      const third = await this.measureOutputSilence(300)
-      if (this.getContextState() === 'running' && this.isReady && !third.silent) {
-        audioDiag('lifecycle', 'post-resume drone graph rebuild succeeded', { reason, maxDb: third.maxDb })
-        this.backgroundInterruptionPending = false
-        this.markAudioHealthStableSoon('post-resume-rebuild-ok')
-        return { ok: true, rebuilt: true }
-      }
-    } catch (error) {
-      audioDiag('lifecycle', 'post-resume drone recovery failed — forcing honest UI', {
-        reason,
-        error: error?.message ?? String(error),
-      })
-    }
-
-    // Tier 3: honest UI stopped — let the user do a clean cold Play.
-    audioDiag('lifecycle', 'post-resume drone recovery failed — forcing honest UI', {
-      reason,
-      contextState: this.getContextState(),
-    })
-    setAudioHealth(AudioHealth.FAILED, `post-resume-failed:${reason}`)
-    this.backgroundInterruptionPending = false
-    this.isPlaying = false
-    if (this.onPlaybackInterrupted) {
-      try {
-        this.onPlaybackInterrupted({ wasPlaying: true, wasMetronomePlaying: this.metronomePlaying })
-      } catch {
-        // UI hook failure must never break audio.
-      }
-    }
-    return { ok: false }
+    audioDiag('lifecycle', 'background recovery timers cleared', { reason })
   }
 
   setMetronomeBpm(bpm) {

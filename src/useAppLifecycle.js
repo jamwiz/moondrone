@@ -3,10 +3,9 @@ import { Capacitor } from '@capacitor/core'
 import { droneEngine } from './droneEngine'
 import { audioDiag } from './audioDiagnostics'
 import { configureNativePlaybackSession, getNativeSessionDebugState } from './nativeAudioSession'
-import { isPrimerPlaying } from './iosMediaPrimer'
+import { isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
 import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
 import { msSinceUserAudioAction } from './audioActivity'
-import { getAudioHealth } from './audioHealth'
 
 // Snapshot used by every lifecycle diagnostic so the debug panel can show what the app saw at
 // each background/foreground transition.
@@ -36,10 +35,12 @@ function lifecycleSnapshot(extra = {}) {
   }
 }
 
-// Production: iOS native app continues drone/metronome during background and lock screen.
-// Requires UIBackgroundModes audio in ios/App/App/Info.plist.
-// Set to false only to restore stop-on-background on iOS (not recommended for release).
-export const ENABLE_IOS_BACKGROUND_AUDIO = true
+// Background audio is intentionally DISABLED. Keeping Moondrone playing in the background under
+// WKWebView/TestFlight was too glitchy (pops, context interruptions, frozen metronome timing, and
+// "UI playing but silent" states). When the app backgrounds/locks/goes inactive we now stop cleanly
+// and make the UI honest; the next Play is a clean foreground start. Do NOT flip this back on
+// without also restoring UIBackgroundModes `audio` in ios/App/App/Info.plist.
+export const ENABLE_IOS_BACKGROUND_AUDIO = false
 
 // Temporary diagnostics for foreground resume — set true locally when debugging lifecycle resume.
 const BACKGROUND_AUDIO_RESUME_DEBUG = false
@@ -122,77 +123,13 @@ function prewarmNativePlaybackSession(source) {
   void configureNativePlaybackSession(`prewarm-${source}`, { throttle: true })
 }
 
-// On app resume, verify rather than blindly prewarm/reconfigure:
-//   - audio active + context running   -> leave it alone (do not touch the session)
-//   - audio active + context not running -> run the shared recovery path ONCE
-//   - idle                              -> prewarm through the strict gate
-function handleResumeHealthCheck(source, uiIsPlaying, uiIsMetronomePlaying) {
-  const droneIntended = uiIsPlaying === true || droneEngine.isPlaying === true
-  const metronomeIntended = uiIsMetronomePlaying === true || droneEngine.metronomePlaying === true
-  const audioWasActive = droneIntended || metronomeIntended
-  const contextState = droneEngine.getContextState?.() ?? 'unknown'
-
-  if (!audioWasActive) {
-    audioDiag('lifecycle', 'resume health check — idle prewarm allowed', { source, contextState })
-    prewarmNativePlaybackSession(source)
-    return
-  }
-
-  // Drone was intended playing: a running context (or "stable" health) is NOT proof the speaker is
-  // fed again on iOS. Run the tiered output verify/repair/rebuild — it owns audio-health, recovers
-  // the context if needed, and forces honest UI if it cannot restore real output.
-  if (droneIntended) {
-    audioDiag('lifecycle', 'resume health check — verifying drone output', {
-      source,
-      contextState,
-      health: getAudioHealth(),
-      backgroundInterruptionPending: droneEngine.backgroundInterruptionPending === true,
-    })
-    void Promise.resolve(droneEngine.verifyAndRepairDroneOutputAfterResume?.(`resume-${source}`))
-      .then((result) => {
-        if (result?.ok && (result.repaired || result.rebuilt)) {
-          audioDiag('lifecycle', 'resume recovery verified context running before stable', {
-            source,
-            contextState: droneEngine.getContextState?.() ?? 'unknown',
-            repaired: result.repaired === true,
-            rebuilt: result.rebuilt === true,
-          })
-        }
-      })
-      .catch(() => {})
-    return
-  }
-
-  // Metronome-only active: keep the lighter context-recovery path.
-  if (contextState === 'running') {
-    audioDiag('lifecycle', 'resume health check — audio active, no prewarm', {
-      source,
-      contextState,
-      health: getAudioHealth(),
-    })
-    return
-  }
-
-  audioDiag('lifecycle', 'resume health check — recovering interrupted audio', {
-    source,
-    contextState,
-    health: getAudioHealth(),
-  })
-  void Promise.resolve(droneEngine.attemptContextInterruptRecovery?.(`resume-${source}`)).then((recovered) => {
-    const contextAfter = droneEngine.getContextState?.() ?? 'unknown'
-    const audioStillActive = droneEngine.metronomePlaying === true
-
-    if (recovered && contextAfter === 'running' && audioStillActive) {
-      audioDiag('lifecycle', 'resume recovery verified context running before stable', {
-        source,
-        contextState: contextAfter,
-      })
-      audioDiag('lifecycle', 'resume recovered active audio — no UI reset', {
-        source,
-        contextState: contextAfter,
-      })
-    }
-  }).catch(() => {})
+// On app resume: background audio is disabled, so the lifecycle stop already made us idle before we
+// got here. There is nothing to recover/repair — clear any stale background recovery state and do a
+// strict idle prewarm. The next user Play runs the normal safe foreground startup path.
+function handleResumeHealthCheck(source) {
+  droneEngine.clearBackgroundRecoveryState?.(source)
+  audioDiag('lifecycle', 'resume after background stop — idle', lifecycleSnapshot({ source }))
+  prewarmNativePlaybackSession(source)
 }
 
 function logBackgroundAudioResume(source, details) {
@@ -267,16 +204,28 @@ async function attemptForegroundResume(source, uiIsPlaying, uiIsMetronomePlaying
 }
 
 function stopPlaybackForLifecycle(setIsPlaying, setIsMetronomePlaying, source) {
-  audioDiag('lifecycle', `stopForLifecycle CALLED (${source})`, lifecycleSnapshot())
-  const { wasPlaying, wasMetronomePlaying } = droneEngine.stopForLifecycle()
+  audioDiag('lifecycle', 'background audio disabled — stopping playback', lifecycleSnapshot({ source }))
 
-  if (wasPlaying) {
-    setIsPlaying(false)
+  // Graceful declick + clean teardown (NOT a hard reset). Engine reflects stopped intent
+  // synchronously so the next Play takes the safe foreground startup path.
+  const { wasPlaying, wasMetronomePlaying } = droneEngine.gracefulStopForLifecycle()
+
+  // Make the UI honest immediately — never leave Play active when lifecycle stopped audio.
+  setIsPlaying(false)
+  setIsMetronomePlaying(false)
+
+  // Pause the primer only AFTER audio has been stopped (force past the startup-guard skip).
+  try {
+    pausePrimer(`background-stop:${source}`, { force: true })
+  } catch {
+    // Primer may be absent on non-iOS; ignore.
   }
 
-  if (wasMetronomePlaying) {
-    setIsMetronomePlaying(false)
-  }
+  audioDiag('lifecycle', 'background stop complete — UI stopped', {
+    source,
+    wasPlaying,
+    wasMetronomePlaying,
+  })
 }
 
 export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying = false, uiIsMetronomePlaying = false) {
@@ -370,7 +319,7 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
           }
 
           audioDiag('lifecycle', 'app resume / active', lifecycleSnapshot())
-          handleResumeHealthCheck('appStateChange-active', uiIsPlaying, uiIsMetronomePlaying)
+          handleResumeHealthCheck('appStateChange-active')
         }).then((handle) => {
           if (cancelled) {
             handle.remove()
