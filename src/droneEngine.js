@@ -9094,6 +9094,20 @@ export class DroneEngine {
       return
     }
 
+    // Nothing is supposed to be playing (idle, between Stop and the next Play). A native prewarm /
+    // session-assert can emit an interruption here — that must NOT hard-reset and dispose the graph
+    // (doing so caused a clip/pop on the next Play). Leave the (silent) graph intact; the next Play
+    // resumes the context via resumeContextIfNeeded(). media-services-reset is handled above and
+    // still hard-resets because it genuinely invalidates the nodes.
+    if (!this.isPlaying && !this.metronomePlaying && !this.isStarting) {
+      audioDiag('interruption', 'native interruption while idle — ignored (no hard reset)', {
+        reason,
+        contextState: this.getContextState(),
+        isReady: this.isReady,
+      })
+      return
+    }
+
     this.handleNativeAudioInterruptionConfirmed(reason)
   }
 
@@ -11608,6 +11622,13 @@ export class DroneEngine {
       this.metronomeSchedulerTickCount += 1
       this.scheduleMetronomeBeats()
 
+      // Only log "tick fired" when the context is actually running — while interrupted the scheduler
+      // returns cleanly without scheduling, so logging every tick was just noise/spam during the
+      // recovery window. (scheduleMetronomeBeats already logs the paused state once.)
+      if (this.getContextState() !== 'running') {
+        return
+      }
+
       // Temporary debug: prove the repeating callback is actually firing (first few only).
       if ((this.metronomeTickLogCount ?? 0) < 8) {
         this.metronomeTickLogCount = (this.metronomeTickLogCount ?? 0) + 1
@@ -11790,7 +11811,7 @@ export class DroneEngine {
         }
 
         await this.resumeContextIfNeeded()
-        await configureNativePlaybackSession('metronome-pre-scheduler')
+        await configureNativePlaybackSession('metronome-pre-scheduler', { throttle: true })
         await new Promise((resolve) => {
           window.setTimeout(resolve, attemptLabel === 'initial' ? 1100 : 500)
         })

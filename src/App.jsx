@@ -23,6 +23,7 @@ import { getMoonArtworkSrc } from './moonArtwork'
 import { audioDiag } from './audioDiagnostics'
 import { addNativeAudioSessionListeners, configureNativePlaybackSession } from './nativeAudioSession'
 import { ensurePrimerPlaying, getPrimerDebugState, isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
+import { markUserAudioAction } from './audioActivity'
 import {
   beginMediaPrimerStartup,
   endMediaPrimerStartup,
@@ -311,6 +312,7 @@ function App() {
       return
     }
 
+    markUserAudioAction()
     setIsDroneStarting(true)
   }
 
@@ -320,6 +322,7 @@ function App() {
       return
     }
 
+    markUserAudioAction()
     setIsDroneStarting(true)
     isStartingRef.current = true
 
@@ -387,6 +390,7 @@ function App() {
       return
     }
 
+    markUserAudioAction()
     setIsDroneStarting(false)
     droneEngine.stop()
     setIsPlaying(false)
@@ -412,6 +416,7 @@ function App() {
       return
     }
 
+    markUserAudioAction()
     isStartingRef.current = true
 
     const audioAlreadyLive = isAudioAlreadyLive()
@@ -540,6 +545,7 @@ function App() {
   }
 
   async function handleMetronomePlay() {
+    markUserAudioAction()
     audioDiag('metronome', 'handleMetronomePlay invoked — UI BEFORE', {
       uiIsMetronomePlaying: isMetronomePlaying,
       metronomeStartPending: metronomeStartPendingRef.current,
@@ -660,6 +666,7 @@ function App() {
   }
 
   function handleMetronomeStop() {
+    markUserAudioAction()
     beginMetronomeOperation('stop')
     metronomeStartPendingRef.current = false
 

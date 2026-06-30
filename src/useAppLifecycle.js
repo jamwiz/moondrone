@@ -4,6 +4,8 @@ import { droneEngine } from './droneEngine'
 import { audioDiag } from './audioDiagnostics'
 import { configureNativePlaybackSession, getNativeSessionDebugState } from './nativeAudioSession'
 import { isPrimerPlaying } from './iosMediaPrimer'
+import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
+import { msSinceUserAudioAction } from './audioActivity'
 
 // Snapshot used by every lifecycle diagnostic so the debug panel can show what the app saw at
 // each background/foreground transition.
@@ -68,12 +70,50 @@ function shouldAttemptLifecycleResume(uiIsPlaying) {
     && droneEngine.isPlaying
 }
 
+// Do not prewarm within this window after a user audio control tap — focus/visibility/appState
+// events can fire during normal control interactions, and a native reconfigure right then emits an
+// audioSessionInterrupted that can disrupt live audio.
+const PREWARM_USER_ACTION_COOLDOWN_MS = 2000
+
+// Strict gate: a native reconfigure is only harmless when truly idle. Returns a skip reason string
+// (for logging) or null when prewarm is allowed.
+function prewarmSkipReason() {
+  if (isMediaPrimerStartupActive()) {
+    return 'startup/stop in progress'
+  }
+
+  if (droneEngine.isStarting === true) {
+    return 'startup/stop in progress'
+  }
+
+  if (droneEngine.isStopFadeActive?.() === true) {
+    return 'startup/stop in progress'
+  }
+
+  if (droneEngine.isPlaying === true || droneEngine.metronomePlaying === true) {
+    return 'audio active'
+  }
+
+  if (msSinceUserAudioAction() < PREWARM_USER_ACTION_COOLDOWN_MS) {
+    return 'recent user audio action'
+  }
+
+  return null
+}
+
 // Safe, silent native prewarm: assert the AVAudioSession Playback category so it is already warm
 // before the first Play tap. This does NOT play the media primer, does NOT call Tone.start, and
 // does NOT start any oscillator/WebAudio — the actual audio unlock stays inside the Play gesture.
-// Throttled so app-open + resume + focus callbacks do not spam the native bridge.
+// Only fired on true app-open and native app-resume, and only when the strict idle gate passes —
+// firing it during normal control flow was causing interruption-driven hard resets.
 function prewarmNativePlaybackSession(source) {
   if (!isIosNativePlatform()) {
+    return
+  }
+
+  const skipReason = prewarmSkipReason()
+  if (skipReason) {
+    audioDiag('native-prewarm', `prewarm skipped — ${skipReason}`, { source })
     return
   }
 
@@ -166,10 +206,15 @@ function stopPlaybackForLifecycle(setIsPlaying, setIsMetronomePlaying, source) {
 }
 
 export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying = false, uiIsMetronomePlaying = false) {
+  // App open: silently warm the native Playback session ONCE on true mount (no audio, no Tone.start,
+  // no primer). Kept in its own empty-deps effect so it cannot re-fire on every play/stop — the
+  // main effect below re-runs when uiIsPlaying/uiIsMetronomePlaying change, and re-firing app-open
+  // prewarm there was reconfiguring the native session mid-control and causing interruptions.
   useEffect(() => {
-    // App open: silently warm the native Playback session (no audio, no Tone.start, no primer).
     prewarmNativePlaybackSession('app-open')
+  }, [])
 
+  useEffect(() => {
     const onVisibilityChange = () => {
       if (document.hidden) {
         if (shouldStopPlaybackOnVisibilityOrPageHide()) {
@@ -187,7 +232,6 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
       }
 
       audioDiag('lifecycle', 'visibilitychange → visible', lifecycleSnapshot())
-      prewarmNativePlaybackSession('visibilitychange-visible')
       void attemptForegroundResume('visibilitychange-visible', uiIsPlaying, uiIsMetronomePlaying)
     }
 
@@ -201,13 +245,11 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
       }
 
       audioDiag('lifecycle', 'pageshow', lifecycleSnapshot({ persisted: event.persisted }))
-      prewarmNativePlaybackSession('pageshow')
       void attemptForegroundResume('pageshow', uiIsPlaying, uiIsMetronomePlaying)
     }
 
     const onWindowFocus = () => {
       audioDiag('lifecycle', 'window focus', lifecycleSnapshot())
-      prewarmNativePlaybackSession('window-focus')
       void attemptForegroundResume('window-focus', uiIsPlaying, uiIsMetronomePlaying)
     }
 
