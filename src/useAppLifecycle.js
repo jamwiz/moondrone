@@ -127,49 +127,72 @@ function prewarmNativePlaybackSession(source) {
 //   - audio active + context not running -> run the shared recovery path ONCE
 //   - idle                              -> prewarm through the strict gate
 function handleResumeHealthCheck(source, uiIsPlaying, uiIsMetronomePlaying) {
-  const audioWasActive = uiIsPlaying === true
-    || uiIsMetronomePlaying === true
-    || droneEngine.isPlaying === true
-    || droneEngine.metronomePlaying === true
+  const droneIntended = uiIsPlaying === true || droneEngine.isPlaying === true
+  const metronomeIntended = uiIsMetronomePlaying === true || droneEngine.metronomePlaying === true
+  const audioWasActive = droneIntended || metronomeIntended
   const contextState = droneEngine.getContextState?.() ?? 'unknown'
 
-  if (audioWasActive) {
-    if (contextState === 'running') {
-      audioDiag('lifecycle', 'resume health check — audio active, no prewarm', {
-        source,
-        contextState,
-        health: getAudioHealth(),
-      })
-      return
-    }
+  if (!audioWasActive) {
+    audioDiag('lifecycle', 'resume health check — idle prewarm allowed', { source, contextState })
+    prewarmNativePlaybackSession(source)
+    return
+  }
 
-    audioDiag('lifecycle', 'resume health check — recovering interrupted audio', {
+  // Drone was intended playing: a running context (or "stable" health) is NOT proof the speaker is
+  // fed again on iOS. Run the tiered output verify/repair/rebuild — it owns audio-health, recovers
+  // the context if needed, and forces honest UI if it cannot restore real output.
+  if (droneIntended) {
+    audioDiag('lifecycle', 'resume health check — verifying drone output', {
+      source,
+      contextState,
+      health: getAudioHealth(),
+      backgroundInterruptionPending: droneEngine.backgroundInterruptionPending === true,
+    })
+    void Promise.resolve(droneEngine.verifyAndRepairDroneOutputAfterResume?.(`resume-${source}`))
+      .then((result) => {
+        if (result?.ok && (result.repaired || result.rebuilt)) {
+          audioDiag('lifecycle', 'resume recovery verified context running before stable', {
+            source,
+            contextState: droneEngine.getContextState?.() ?? 'unknown',
+            repaired: result.repaired === true,
+            rebuilt: result.rebuilt === true,
+          })
+        }
+      })
+      .catch(() => {})
+    return
+  }
+
+  // Metronome-only active: keep the lighter context-recovery path.
+  if (contextState === 'running') {
+    audioDiag('lifecycle', 'resume health check — audio active, no prewarm', {
       source,
       contextState,
       health: getAudioHealth(),
     })
-    void Promise.resolve(droneEngine.attemptContextInterruptRecovery?.(`resume-${source}`)).then((recovered) => {
-      const contextAfter = droneEngine.getContextState?.() ?? 'unknown'
-      const audioStillActive = droneEngine.isPlaying === true || droneEngine.metronomePlaying === true
-
-      if (recovered && contextAfter === 'running' && audioStillActive) {
-        // Recovery only counts on resume when the context is verifiably running again. Stable is
-        // gated separately (markAudioHealthStableSoon also re-checks native session + survival).
-        audioDiag('lifecycle', 'resume recovery verified context running before stable', {
-          source,
-          contextState: contextAfter,
-        })
-        audioDiag('lifecycle', 'resume recovered active audio — no UI reset', {
-          source,
-          contextState: contextAfter,
-        })
-      }
-    }).catch(() => {})
     return
   }
 
-  audioDiag('lifecycle', 'resume health check — idle prewarm allowed', { source, contextState })
-  prewarmNativePlaybackSession(source)
+  audioDiag('lifecycle', 'resume health check — recovering interrupted audio', {
+    source,
+    contextState,
+    health: getAudioHealth(),
+  })
+  void Promise.resolve(droneEngine.attemptContextInterruptRecovery?.(`resume-${source}`)).then((recovered) => {
+    const contextAfter = droneEngine.getContextState?.() ?? 'unknown'
+    const audioStillActive = droneEngine.metronomePlaying === true
+
+    if (recovered && contextAfter === 'running' && audioStillActive) {
+      audioDiag('lifecycle', 'resume recovery verified context running before stable', {
+        source,
+        contextState: contextAfter,
+      })
+      audioDiag('lifecycle', 'resume recovered active audio — no UI reset', {
+        source,
+        contextState: contextAfter,
+      })
+    }
+  }).catch(() => {})
 }
 
 function logBackgroundAudioResume(source, details) {
