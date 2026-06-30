@@ -149,10 +149,19 @@ function handleResumeHealthCheck(source, uiIsPlaying, uiIsMetronomePlaying) {
       health: getAudioHealth(),
     })
     void Promise.resolve(droneEngine.attemptContextInterruptRecovery?.(`resume-${source}`)).then((recovered) => {
-      if (recovered && (droneEngine.isPlaying === true || droneEngine.metronomePlaying === true)) {
+      const contextAfter = droneEngine.getContextState?.() ?? 'unknown'
+      const audioStillActive = droneEngine.isPlaying === true || droneEngine.metronomePlaying === true
+
+      if (recovered && contextAfter === 'running' && audioStillActive) {
+        // Recovery only counts on resume when the context is verifiably running again. Stable is
+        // gated separately (markAudioHealthStableSoon also re-checks native session + survival).
+        audioDiag('lifecycle', 'resume recovery verified context running before stable', {
+          source,
+          contextState: contextAfter,
+        })
         audioDiag('lifecycle', 'resume recovered active audio — no UI reset', {
           source,
-          contextState: droneEngine.getContextState?.() ?? 'unknown',
+          contextState: contextAfter,
         })
       }
     }).catch(() => {})

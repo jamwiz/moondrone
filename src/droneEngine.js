@@ -1,6 +1,6 @@
 import * as Tone from 'tone'
 import { audioDiag } from './audioDiagnostics'
-import { configureNativePlaybackSession, isNativePlaybackRecentlyConfigured } from './nativeAudioSession'
+import { configureNativePlaybackSession, isNativePlaybackRecentlyConfigured, wasLastNativeConfigureClean } from './nativeAudioSession'
 import { ensurePrimerPlaying, getPrimerDebugState, isIosNative, isPrimerPlaying } from './iosMediaPrimer'
 import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
 import { AudioHealth, setAudioHealth, scheduleAudioStable } from './audioHealth'
@@ -357,6 +357,11 @@ export class DroneEngine {
     // callbacks capture the token and bail if a newer start/stop has superseded them — this is what
     // makes Stop → quick Play safe (no stale fade or teardown bleeding into the fresh start).
     this.droneOpGeneration = 0
+    // Explicit-stop intent gate (separate from graph readiness). After a user Stop, isReady /
+    // masterChainReady / running context are NOT enough to qualify a lightweight drone start — the
+    // next Play must take the safe startup path. Cleared on a clean start().
+    this.droneExplicitlyStopped = false
+    this.lastDroneStopAt = 0
     this.noteCrossfadeEndsAt = 0
     this.noteCrossfadeTimeoutIds = []
     // Each in-flight crossfade's outgoing voices get their own dispose timer here
@@ -506,6 +511,8 @@ export class DroneEngine {
     }
 
     this.isStarting = true
+    // A clean Play clears the explicit-stop gate so lightweight paths qualify again once stable.
+    this.droneExplicitlyStopped = false
     const opToken = this.bumpDroneOpGeneration('start')
 
     // Restart-during-shutdown: Play arrived while a Stop fade-out / teardown is still pending.
@@ -673,6 +680,12 @@ export class DroneEngine {
 
     this.bumpDroneOpGeneration('stop')
 
+    // Explicit user Stop: drop the "drone is live/recently safe" qualification immediately so the
+    // next Play takes the safe startup path (warm graph + running context is NOT enough after a
+    // deliberate stop). Quick-restart-during-active-fade is handled separately in start().
+    this.droneExplicitlyStopped = true
+    this.lastDroneStopAt = Date.now()
+
     const stopTime = Tone.now()
 
     this.clearSimpleMoonTransitionTimeout()
@@ -703,6 +716,10 @@ export class DroneEngine {
     this.presetTransitionEndsAt = 0
     // Any in-flight crossfade voices keep their own fade-out + dispose timers,
     // so they retire cleanly without a click on Stop.
+    audioDiag('drone-lifecycle', 'drone stop completed — lightweight drone start disabled until clean play', {
+      stopFadeSeconds: STOP_FADE_SECONDS,
+      generation: this.droneOpGeneration,
+    })
   }
 
   stopForLifecycle() {
@@ -4643,7 +4660,22 @@ export class DroneEngine {
   // settle window. Used after a successful start or recovery so lightweight paths re-enable only
   // once the shared session is genuinely healthy.
   markAudioHealthStableSoon(reason, delayMs = 600) {
-    scheduleAudioStable(delayMs, () => this.getContextState() === 'running', reason)
+    // Honesty gate: only mark stable if BOTH the context survives the settle window AND the native
+    // Playback session is clean (no "Session activation failed"). A recovery that ran while
+    // backgrounded/locked can resolve with a partial native failure — never call that stable.
+    scheduleAudioStable(delayMs, () => {
+      if (this.getContextState() !== 'running') {
+        return false
+      }
+      if (isIosNative() && !wasLastNativeConfigureClean()) {
+        audioDiag('audio-health', 'audio health stable denied — native session error', {
+          reason,
+          contextState: this.getContextState(),
+        })
+        return false
+      }
+      return true
+    }, reason)
   }
 
   // Restart-during-shutdown safety: a Stop schedules a multi-second fade-out on the live voices
@@ -8962,12 +8994,25 @@ export class DroneEngine {
   onMetronomeContextRecovered() {
     this.metronomeContextRecoveryDeadline = 0
 
-    if (this.metronomePlaying) {
-      this.metronomeNeedsResync = true
-      audioDiag('metronome-engine', 'metronome context recovered — scheduler will resync from next beat', {
+    if (!this.metronomePlaying) {
+      return
+    }
+
+    // Only resync if the scheduler ACTUALLY stalled (scheduleMetronomeBeats hit the paused branch
+    // and set metronomeContextStallLogged). A stale/early recovery from the startup window fires
+    // while the context is already running and the scheduler never paused — resyncing then resets
+    // nextMetronomeBeatTime and produces the audible early/double click. Ignore it.
+    if (!this.metronomeContextStallLogged) {
+      audioDiag('metronome-engine', 'metronome recovery ignored — startup already stable', {
         contextState: this.getContextState(),
       })
+      return
     }
+
+    this.metronomeNeedsResync = true
+    audioDiag('metronome-engine', 'metronome context recovered — scheduler will resync from next beat', {
+      contextState: this.getContextState(),
+    })
   }
 
   scheduleContextInterruptRecovery(reason) {
@@ -9014,6 +9059,19 @@ export class DroneEngine {
         this.markAudioHealthStableSoon('recovered-already-running')
         this.onMetronomeContextRecovered()
         return true
+      }
+
+      // Backgrounded/locked with an interrupted context: do NOT run aggressive recovery loops here.
+      // While hidden, native session activation routinely fails ("Session activation failed") and a
+      // forced recovery would either churn or falsely mark stable. Defer until the app resumes — the
+      // resume health check recovers once and verifies actual running state before stable. (Audio
+      // that is genuinely still running already returned above.)
+      if (typeof document !== 'undefined' && document.hidden) {
+        audioDiag('startup-guard', 'background recovery deferred until resume', {
+          reason,
+          stateBefore,
+        })
+        return false
       }
 
       if (isMediaPrimerStartupActive()) {
@@ -11904,12 +11962,24 @@ export class DroneEngine {
     }
 
     if (this.metronomeNeedsResync) {
-      this.metronomeNeedsResync = false
-      this.metronomeContextStallLogged = false
-      this.nextMetronomeBeatTime = Tone.now() + 0.05
-      audioDiag('metronome-engine', 'metronome scheduler resynced after context recovery', {
-        contextState: state,
-      })
+      // Defense-in-depth: if a resync was flagged but the scheduler never actually stalled and we
+      // just started the audible scheduler, this is a stale startup recovery — skip the resync so we
+      // do not reset nextMetronomeBeatTime and emit an early/double click.
+      const sinceAudibleStart = Date.now() - (this.metronomeAudibleStartAt ?? 0)
+      if (!this.metronomeContextStallLogged && sinceAudibleStart < 1500) {
+        this.metronomeNeedsResync = false
+        audioDiag('metronome-engine', 'metronome scheduler resync skipped — stale startup recovery', {
+          contextState: state,
+          sinceAudibleStart,
+        })
+      } else {
+        this.metronomeNeedsResync = false
+        this.metronomeContextStallLogged = false
+        this.nextMetronomeBeatTime = Tone.now() + 0.05
+        audioDiag('metronome-engine', 'metronome scheduler resynced after context recovery', {
+          contextState: state,
+        })
+      }
     }
 
     const now = Tone.now()
@@ -12087,10 +12157,24 @@ export class DroneEngine {
       return false
     }
 
+    // Consume any context-interrupt recovery that was scheduled DURING this startup. The audible
+    // scheduler is now starting from a clean, running context, so a stale earlier recovery must not
+    // later fire and resync (the cause of first-click → early/double-click → normal).
+    if (this.contextInterruptDebounceTimer) {
+      window.clearTimeout(this.contextInterruptDebounceTimer)
+      this.contextInterruptDebounceTimer = null
+      audioDiag('metronome-engine', 'metronome startup consumed pending interruption recovery', {
+        reason,
+        startupGeneration,
+      })
+    }
+    this.metronomeContextRecoveryDeadline = 0
+
     // Clean slate: no stale next-beat time, beat index, primed beats, or counters.
     this.metronomeMeasureBeatIndex = 0
     this.metronomeNeedsResync = false
     this.metronomeContextStallLogged = false
+    this.metronomeAudibleStartAt = Date.now()
     this.metronomePlaying = true
     this.applyDroneMetronomeHeadroom()
     this.nextMetronomeBeatTime = Tone.now() + 0.05
@@ -12158,6 +12242,43 @@ export class DroneEngine {
   }
 
   cancelPendingMetronomeClicks() {
+    // iOS oscillator-primary: cancel any future scheduled click envelopes and release the running
+    // click oscillator to silence with a tiny declick. Without this, a click whose down-ramp was
+    // scheduled past the stop (lookahead) can leave the oscillator sustained at an audible level —
+    // the "high tone after stop" bug. We silence the dedicated click volume only; the oscillator
+    // keeps running at -100 dB and is disposed later by disposeMetronomeChain (never the master).
+    if (this.metronomeFallbackVolume) {
+      const volumeParam = this.metronomeFallbackVolume.volume
+      const now = Tone.now()
+      let wasAudible = false
+
+      try {
+        const currentDb = typeof volumeParam.getValueAtTime === 'function'
+          ? volumeParam.getValueAtTime(now)
+          : volumeParam.value
+        wasAudible = currentDb > -60
+
+        if (typeof volumeParam.cancelAndHoldAtTime === 'function') {
+          volumeParam.cancelAndHoldAtTime(now)
+        } else {
+          volumeParam.cancelScheduledValues(now)
+        }
+        volumeParam.linearRampToValueAtTime(-100, now + 0.02)
+      } catch {
+        // Param may be mid-teardown; the chain dispose will finish silencing it.
+      }
+
+      if (wasAudible) {
+        audioDiag('metronome-engine', 'metronome stop active click oscillators released', {
+          contextState: this.getContextState(),
+        })
+      }
+
+      audioDiag('metronome-engine', 'metronome oscillator cleanup complete', {
+        contextState: this.getContextState(),
+      })
+    }
+
     if (!this.metronomePlayerPools) {
       return
     }

@@ -80,6 +80,9 @@ const OCTAVE_OPTIONS = [
 const DEFAULT_INTENSITY = 70
 const DEFAULT_BREATH = 35
 const DEFAULT_METRONOME_BPM = 80
+// Delay before pausing the media primer after a drone Stop. Must exceed the drone stop fade so the
+// fade completes audibly; pausing the primer earlier can make iOS interrupt the WebAudio context.
+const DRONE_STOP_PRIMER_PAUSE_DELAY_MS = 5000
 const DEFAULT_MASTER_VOLUME = 100
 const MIN_REFERENCE_A_HZ = 415
 const MAX_REFERENCE_A_HZ = 445
@@ -153,6 +156,7 @@ function App() {
   const [moodId, setMoodId] = useState(readStoredMood)
   const isStartingRef = useRef(false)
   const metronomeStartPendingRef = useRef(false)
+  const dronePrimerPauseTimerRef = useRef(null)
 
   useAppLifecycle(setIsPlaying, setIsMetronomePlaying, isPlaying, isMetronomePlaying)
 
@@ -308,12 +312,36 @@ function App() {
 
     const diag = droneEngine.getMetronomeDiagnostics?.() ?? {}
     const contextRunning = diag.contextState === 'running'
-    const droneReady = diag.isReady === true && contextRunning
     const metronomeLive = diag.metronomePlaying === true
       && diag.schedulerActive === true
       && contextRunning
 
-    if (droneReady || metronomeLive) {
+    // Quick restart while a Stop fade is still active: warm graph + running context, and start()
+    // force-silences the stopping graph. This is a genuine fast restart path.
+    if (contextRunning && droneEngine.isStopFadeActive?.()) {
+      audioDiag('drone', 'drone quick restart during active fade — using restart path', {
+        health: getAudioHealth(),
+      })
+      return true
+    }
+
+    // Metronome actively scheduling → shared session is genuinely live → lightweight ok.
+    if (metronomeLive) {
+      return true
+    }
+
+    // After an explicit drone Stop, isReady/masterChainReady/running is NOT enough. Force the safe
+    // startup path so the next Play actually makes sound.
+    if (droneEngine.droneExplicitlyStopped) {
+      audioDiag('drone', 'drone lightweight start denied — explicit stop requires safe start', {
+        health: getAudioHealth(),
+        ...diag,
+      })
+      return false
+    }
+
+    const droneReady = diag.isReady === true && contextRunning && droneEngine.isPlaying === true
+    if (droneReady) {
       return true
     }
 
@@ -422,13 +450,47 @@ function App() {
 
     markUserAudioAction()
     setIsDroneStarting(false)
+    audioDiag('drone-lifecycle', 'drone stop fade begin')
     droneEngine.stop()
     setIsPlaying(false)
 
-    // Keep the primer alive if the metronome is still playing; otherwise we are now idle.
-    if (!isMetronomePlaying) {
-      pausePrimer('drone-stop')
+    // Keep the primer alive if the metronome is still playing.
+    if (isMetronomePlaying) {
+      return
     }
+
+    // Do NOT pause the primer immediately: pausing it during the stop fade can make iOS
+    // interrupt/suspend the WebAudio context, which cuts the fade short AND silences the next start.
+    // Defer the pause until the fade has fully completed and the app is genuinely idle.
+    schedulePrimerPauseAfterDroneStopFade()
+  }
+
+  function schedulePrimerPauseAfterDroneStopFade() {
+    audioDiag('media-primer', 'primer pause deferred until drone stop fade complete')
+
+    if (dronePrimerPauseTimerRef.current) {
+      window.clearTimeout(dronePrimerPauseTimerRef.current)
+    }
+
+    dronePrimerPauseTimerRef.current = window.setTimeout(() => {
+      dronePrimerPauseTimerRef.current = null
+
+      const audioStillActive = droneEngine.isPlaying === true
+        || droneEngine.isStarting === true
+        || droneEngine.metronomePlaying === true
+        || isStartingRef.current === true
+
+      if (audioStillActive) {
+        audioDiag('media-primer', 'primer pause skipped — would interrupt active WebAudio', {
+          dronePlaying: droneEngine.isPlaying,
+          metronomePlaying: droneEngine.metronomePlaying,
+        })
+        return
+      }
+
+      pausePrimer('drone-stop-fade-complete')
+      audioDiag('drone-lifecycle', 'drone stop fade complete')
+    }, DRONE_STOP_PRIMER_PAUSE_DELAY_MS)
   }
 
   function shouldForwardKeyToEngine() {

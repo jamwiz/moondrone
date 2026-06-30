@@ -7,6 +7,18 @@ const nativeSessionDebug = {
   lastResult: null,
   lastError: null,
   registrationStatus: 'unknown',
+  lastResultHadError: false,
+}
+
+// A native session result can resolve with a Playback category but still carry an error string
+// (e.g. "Session activation failed" when backgrounded/locked). That is NOT a clean success.
+export function nativeSessionResultHasError(state) {
+  if (!state || typeof state !== 'object') {
+    return false
+  }
+  const err = state.error
+  return (typeof err === 'string' && err.length > 0)
+    || (err != null && typeof err === 'object' && typeof err.message === 'string' && err.message.length > 0)
 }
 
 // Throttle window for idempotent reconfigure: if the session is already Playback and was
@@ -32,12 +44,20 @@ export function isIosNative() {
   }
 }
 
-// True when the last native result was Playback (the session is currently in the right category).
+// True when the last native result was Playback AND carried no error (the session is currently in
+// the right category and was activated cleanly).
 export function isNativePlaybackActive() {
   return Boolean(
     nativeSessionDebug.lastResult
-    && nativeSessionDebug.lastResult.category === 'AVAudioSessionCategoryPlayback',
+    && nativeSessionDebug.lastResult.category === 'AVAudioSessionCategoryPlayback'
+    && !nativeSessionDebug.lastResultHadError,
   )
+}
+
+// True only when the most recent native configure resolved cleanly (Playback, no error string).
+// Recovery uses this to refuse marking audio health stable after a partial failure.
+export function wasLastNativeConfigureClean() {
+  return isNativePlaybackActive()
 }
 
 // True when Playback is active AND was (re)configured within the throttle window — i.e. a fresh
@@ -92,9 +112,26 @@ export async function configureNativePlaybackSession(reason = 'play', { throttle
         code: 'NO_STATE',
         looksUnimplemented: true,
       }
+      nativeSessionDebug.lastResultHadError = true
       setNativeSessionDebug({ result: state ?? null, error: debugError, registrationStatus: 'no-state' })
       audioDiag('native-audio-session', `configurePlaybackSession returned NO STATE (${reason})`, state ?? null)
       return null
+    }
+
+    const hasError = nativeSessionResultHasError(state)
+    nativeSessionDebug.lastResultHadError = hasError
+
+    if (hasError) {
+      // Playback category but activation failed — do NOT treat as a clean configure. Leave
+      // lastPlaybackConfiguredAt stale so throttling does not suppress a real retry, and surface a
+      // partial-failure log so recovery can refuse to mark audio health stable.
+      setNativeSessionDebug({
+        result: state,
+        error: { message: typeof state.error === 'string' ? state.error : state.error?.message, partial: true },
+        registrationStatus: 'registered',
+      })
+      audioDiag('native-audio-session', `native playback configure partial failure (${reason})`, state)
+      return state
     }
 
     setNativeSessionDebug({ result: state, error: null, registrationStatus: 'registered' })
@@ -109,6 +146,7 @@ export async function configureNativePlaybackSession(reason = 'play', { throttle
     const looksUnimplemented = code === 'UNIMPLEMENTED' || /not implemented|unimplemented/i.test(message)
     const debugError = { message, code: code ?? null, looksUnimplemented }
 
+    nativeSessionDebug.lastResultHadError = true
     setNativeSessionDebug({
       result: null,
       error: debugError,
