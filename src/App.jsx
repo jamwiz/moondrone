@@ -278,9 +278,22 @@ function App() {
 
   async function primeForPlayback(reason) {
     audioDiag('media-primer', `primeForPlayback BEGIN (${reason})`)
-    await configureNativePlaybackSession('media-primer-before')
+    // Throttled: if app-open/resume prewarm (or a prior start) already set Playback recently, skip
+    // the native call to avoid back-to-back configure churn. The primer play below is the unlock.
+    await configureNativePlaybackSession('media-primer-before', { throttle: true })
     await ensurePrimerPlaying(reason)
     audioDiag('media-primer', `primeForPlayback END (${reason})`, getPrimerDebugState())
+  }
+
+  // True when audio is already live: a running AudioContext plus either a built master chain (a
+  // drone has played) or an active metronome. In that case a new Play should start lightweight —
+  // no media primer, no startup guard, no native reconfigure — mirroring the drone→metronome path.
+  function isAudioAlreadyLive() {
+    const diag = droneEngine.getMetronomeDiagnostics?.() ?? {}
+    return diag.contextState === 'running'
+      && (diag.masterChainReady === true
+        || diag.metronomePlaying === true
+        || diag.schedulerActive === true)
   }
 
   function isMetronomeEngineReady() {
@@ -309,14 +322,34 @@ function App() {
 
     setIsDroneStarting(true)
     isStartingRef.current = true
-    beginMediaPrimerStartup('drone-play')
-    let guardEnded = false
+
+    const audioAlreadyLive = isAudioAlreadyLive()
+    if (!audioAlreadyLive) {
+      beginMediaPrimerStartup('drone-play')
+    }
+    let guardEnded = audioAlreadyLive
 
     try {
-      audioDiag('drone', 'handlePlay ENTER')
-      await primeForPlayback('drone-play')
+      audioDiag('drone', 'handlePlay ENTER', { audioAlreadyLive })
+
+      if (audioAlreadyLive) {
+        audioDiag('drone', 'drone start over live audio — skipping prime + native reconfigure', {
+          ...droneEngine.getMetronomeDiagnostics?.(),
+        })
+      } else {
+        await primeForPlayback('drone-play')
+      }
+
       applyBinauralBeatToEngine()
-      await droneEngine.start(selectedKey, toEngineVolume(volume), selectedOctave, intensity, breath, FIXED_REVERB_PERCENT)
+      await droneEngine.start(
+        selectedKey,
+        toEngineVolume(volume),
+        selectedOctave,
+        intensity,
+        breath,
+        FIXED_REVERB_PERCENT,
+        { skipNativeReconfigure: audioAlreadyLive },
+      )
 
       const contextOk = await ensureContextRunningAfterStart('drone-play')
       if (!contextOk) {
@@ -325,13 +358,17 @@ function App() {
 
       setIsPlaying(true)
       setIsDroneStarting(false)
-      endMediaPrimerStartup('drone-play-success')
+      if (!audioAlreadyLive) {
+        endMediaPrimerStartup('drone-play-success')
+      }
       guardEnded = true
     } catch (error) {
       audioDiag('drone', 'handlePlay failed', { message: error?.message ?? String(error) })
       setIsPlaying(false)
       setIsDroneStarting(false)
-      endMediaPrimerStartup('drone-play-failed', { immediate: true })
+      if (!audioAlreadyLive) {
+        endMediaPrimerStartup('drone-play-failed', { immediate: true })
+      }
       guardEnded = true
       if (!isMetronomePlaying) {
         pausePrimer('drone-play-failed', { force: true })
@@ -376,13 +413,32 @@ function App() {
     }
 
     isStartingRef.current = true
-    beginMediaPrimerStartup('drone-key-change-start')
-    let guardEnded = false
+
+    const audioAlreadyLive = isAudioAlreadyLive()
+    if (!audioAlreadyLive) {
+      beginMediaPrimerStartup('drone-key-change-start')
+    }
+    let guardEnded = audioAlreadyLive
 
     try {
-      await primeForPlayback('drone-key-change-start')
+      if (audioAlreadyLive) {
+        audioDiag('drone', 'drone key-change start over live audio — skipping prime + native reconfigure', {
+          ...droneEngine.getMetronomeDiagnostics?.(),
+        })
+      } else {
+        await primeForPlayback('drone-key-change-start')
+      }
+
       applyBinauralBeatToEngine()
-      await droneEngine.start(key, toEngineVolume(volume), selectedOctave, intensity, breath, FIXED_REVERB_PERCENT)
+      await droneEngine.start(
+        key,
+        toEngineVolume(volume),
+        selectedOctave,
+        intensity,
+        breath,
+        FIXED_REVERB_PERCENT,
+        { skipNativeReconfigure: audioAlreadyLive },
+      )
 
       const contextOk = await ensureContextRunningAfterStart('drone-key-change-start')
       if (!contextOk) {
@@ -390,12 +446,16 @@ function App() {
       }
 
       setIsPlaying(true)
-      endMediaPrimerStartup('drone-key-change-start-success')
+      if (!audioAlreadyLive) {
+        endMediaPrimerStartup('drone-key-change-start-success')
+      }
       guardEnded = true
     } catch (error) {
       audioDiag('drone', 'handleKeyChange start failed', { message: error?.message ?? String(error) })
       setIsPlaying(false)
-      endMediaPrimerStartup('drone-key-change-failed', { immediate: true })
+      if (!audioAlreadyLive) {
+        endMediaPrimerStartup('drone-key-change-failed', { immediate: true })
+      }
       guardEnded = true
       if (!isMetronomePlaying) {
         pausePrimer('drone-key-change-failed', { force: true })

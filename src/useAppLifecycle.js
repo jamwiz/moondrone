@@ -2,7 +2,7 @@ import { useEffect } from 'react'
 import { Capacitor } from '@capacitor/core'
 import { droneEngine } from './droneEngine'
 import { audioDiag } from './audioDiagnostics'
-import { getNativeSessionDebugState } from './nativeAudioSession'
+import { configureNativePlaybackSession, getNativeSessionDebugState } from './nativeAudioSession'
 import { isPrimerPlaying } from './iosMediaPrimer'
 
 // Snapshot used by every lifecycle diagnostic so the debug panel can show what the app saw at
@@ -66,6 +66,19 @@ function shouldAttemptLifecycleResume(uiIsPlaying) {
   return shouldAllowIosBackgroundPlayback()
     && uiIsPlaying
     && droneEngine.isPlaying
+}
+
+// Safe, silent native prewarm: assert the AVAudioSession Playback category so it is already warm
+// before the first Play tap. This does NOT play the media primer, does NOT call Tone.start, and
+// does NOT start any oscillator/WebAudio — the actual audio unlock stays inside the Play gesture.
+// Throttled so app-open + resume + focus callbacks do not spam the native bridge.
+function prewarmNativePlaybackSession(source) {
+  if (!isIosNativePlatform()) {
+    return
+  }
+
+  audioDiag('native-prewarm', `prewarm native Playback session (${source})`)
+  void configureNativePlaybackSession(`prewarm-${source}`, { throttle: true })
 }
 
 function logBackgroundAudioResume(source, details) {
@@ -154,6 +167,9 @@ function stopPlaybackForLifecycle(setIsPlaying, setIsMetronomePlaying, source) {
 
 export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying = false, uiIsMetronomePlaying = false) {
   useEffect(() => {
+    // App open: silently warm the native Playback session (no audio, no Tone.start, no primer).
+    prewarmNativePlaybackSession('app-open')
+
     const onVisibilityChange = () => {
       if (document.hidden) {
         if (shouldStopPlaybackOnVisibilityOrPageHide()) {
@@ -171,6 +187,7 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
       }
 
       audioDiag('lifecycle', 'visibilitychange → visible', lifecycleSnapshot())
+      prewarmNativePlaybackSession('visibilitychange-visible')
       void attemptForegroundResume('visibilitychange-visible', uiIsPlaying, uiIsMetronomePlaying)
     }
 
@@ -184,11 +201,13 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
       }
 
       audioDiag('lifecycle', 'pageshow', lifecycleSnapshot({ persisted: event.persisted }))
+      prewarmNativePlaybackSession('pageshow')
       void attemptForegroundResume('pageshow', uiIsPlaying, uiIsMetronomePlaying)
     }
 
     const onWindowFocus = () => {
       audioDiag('lifecycle', 'window focus', lifecycleSnapshot())
+      prewarmNativePlaybackSession('window-focus')
       void attemptForegroundResume('window-focus', uiIsPlaying, uiIsMetronomePlaying)
     }
 
@@ -235,6 +254,7 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
           }
 
           audioDiag('lifecycle', 'app resume / active', lifecycleSnapshot())
+          prewarmNativePlaybackSession('appStateChange-active')
           if (shouldAllowIosBackgroundPlayback()) {
             void attemptForegroundResume('appStateChange-active', uiIsPlaying, uiIsMetronomePlaying)
           }

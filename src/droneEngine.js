@@ -352,6 +352,10 @@ export class DroneEngine {
     this.presetTransitionEndsAt = 0
     this.startupFadeEndsAt = 0
     this.stopFadeEndsAt = 0
+    // Monotonic token bumped on every drone start AND stop. Delayed fade/teardown/dispose/startup
+    // callbacks capture the token and bail if a newer start/stop has superseded them — this is what
+    // makes Stop → quick Play safe (no stale fade or teardown bleeding into the fresh start).
+    this.droneOpGeneration = 0
     this.noteCrossfadeEndsAt = 0
     this.noteCrossfadeTimeoutIds = []
     // Each in-flight crossfade's outgoing voices get their own dispose timer here
@@ -476,6 +480,7 @@ export class DroneEngine {
     intensity = this.intensity,
     breath = this.breath,
     reverbWetPercent = this.currentReverbWet * 100,
+    { skipNativeReconfigure = false } = {},
   ) {
     if (this.isPlaying) {
       if (key != null) {
@@ -495,6 +500,30 @@ export class DroneEngine {
     }
 
     this.isStarting = true
+    const opToken = this.bumpDroneOpGeneration('start')
+
+    // Restart-during-shutdown: Play arrived while a Stop fade-out / teardown is still pending.
+    // Silence the old graph NOW so it cannot bleed through during this start's async work.
+    if (this.isReady && this.isStopFadeActive(Tone.now())) {
+      audioDiag('drone-lifecycle', 'restart during stop fade/startup detected', {
+        generation: this.droneOpGeneration,
+        contextState: this.getContextState(),
+      })
+      this.forceSilenceStoppingDroneGraph('restart-during-stop-fade')
+    }
+
+    const isStaleStartup = (phase) => {
+      if (!this.isStarting || !this.isDroneOpCurrent(opToken)) {
+        audioDiag('drone-lifecycle', 'stale drone startup callback ignored', {
+          phase,
+          opToken,
+          generation: this.droneOpGeneration,
+          isStarting: this.isStarting,
+        })
+        return true
+      }
+      return false
+    }
 
     try {
       this.currentKey = key
@@ -510,14 +539,28 @@ export class DroneEngine {
       await this.resumeContextIfNeeded()
       this.ensureContextStateWatcher()
 
+      if (isStaleStartup('after-tone-start')) {
+        return
+      }
+
       // Now that the context exists, re-assert AVAudioSession `.playback` natively so audio ignores
       // the Ring/Silent switch (WKWebView can reset the session on context init). No-op off iOS.
-      await configureNativePlaybackSession('drone-post-context')
+      // When audio is already live (metronome running / chain ready on a running context), skip this
+      // — reconfiguring can emit an interruption that disrupts the live metronome. Otherwise call it
+      // throttled so it does not duplicate a media-primer-before / prewarm configure done moments ago.
+      if (skipNativeReconfigure) {
+        audioDiag('drone-engine', 'skipping native session reconfigure (audio already live)', {
+          contextState: this.getContextState(),
+        })
+      } else {
+        await configureNativePlaybackSession('drone-post-context', { throttle: true })
+      }
       audioDiag('drone-engine', 'context state after post-context native session call', {
         contextState: this.getContextState(),
+        skipNativeReconfigure,
       })
 
-      if (!this.isStarting) {
+      if (isStaleStartup('after-native-session')) {
         return
       }
 
@@ -537,13 +580,17 @@ export class DroneEngine {
       await this.reverb.ready
       await this.moonTransitionReverb?.ready
 
-      if (!this.isStarting) {
+      if (isStaleStartup('after-reverb-ready')) {
         return
       }
 
       // Re-verify after async IR generation — iOS can suspend the context during the gap
       // between Tone.start() and the first scheduled sample.
       await this.resumeContextIfNeeded()
+
+      if (isStaleStartup('after-resume-context')) {
+        return
+      }
 
       this.applyPendingStartupNoteIntent()
       this.updateFrequencies()
@@ -617,6 +664,8 @@ export class DroneEngine {
     if (!this.isReady) {
       return
     }
+
+    this.bumpDroneOpGeneration('stop')
 
     const stopTime = Tone.now()
 
@@ -4570,6 +4619,80 @@ export class DroneEngine {
     return time < this.stopFadeEndsAt
   }
 
+  // Bump the drone operation generation. Called on start and stop so any delayed callback can
+  // detect that it has been superseded.
+  bumpDroneOpGeneration(reason) {
+    this.droneOpGeneration += 1
+    audioDiag('drone-lifecycle', `drone ${reason} generation bumped`, {
+      generation: this.droneOpGeneration,
+    })
+    return this.droneOpGeneration
+  }
+
+  isDroneOpCurrent(token) {
+    return token === this.droneOpGeneration
+  }
+
+  // Restart-during-shutdown safety: a Stop schedules a multi-second fade-out on the live voices
+  // (and may leave outgoing crossfade voice sets fading). If Play happens before that finishes,
+  // the old graph is still connected to master and audible during the new start's async work
+  // (Tone.start / primer / reverb IR). Force the stopping graph silent NOW so the fresh startup
+  // begins from a clean, inaudible state — no stale ramp, no old deck bleeding through.
+  forceSilenceStoppingDroneGraph(reason = 'restart') {
+    const now = Tone.now()
+    const declick = 0.012
+
+    // Stale stop fade is being discarded — cancel the scheduled downward ramps on every voice gain.
+    audioDiag('drone-lifecycle', 'stale drone stop fade ignored', { reason, contextState: this.getContextState() })
+
+    this.voices.forEach((voice) => {
+      const param = voice?.gain?.gain
+      if (!param) {
+        return
+      }
+
+      try {
+        if (typeof param.cancelAndHoldAtTime === 'function') {
+          param.cancelAndHoldAtTime(now)
+        } else {
+          param.cancelScheduledValues(now)
+        }
+        param.setValueAtTime(Math.max(param.value, 0.0001), now)
+        param.linearRampToValueAtTime(0, now + declick)
+      } catch {
+        // Param may already be torn down; the fresh start rebuilds/ramps from zero regardless.
+      }
+    })
+
+    // Mood auxiliary layers (orbit pair + dual beats) snap silent so no remnant survives the gap.
+    try {
+      this.snapMoodAuxiliaryLayersSilent(now + declick)
+    } catch {
+      // Non-fatal — these are re-prepared by the startup cycle.
+    }
+
+    // Retire any outgoing note/moon crossfade voice sets immediately (their own dispose timers
+    // would otherwise keep them connected to master, audible, during the new startup).
+    try {
+      this.disposeAllOutgoingVoiceSets()
+    } catch {
+      // Non-fatal.
+    }
+
+    // Cancel the pending stop-fade window + any in-flight transition timers that could re-expose
+    // old audio against the fresh start.
+    this.stopFadeEndsAt = 0
+    this.clearNoteCrossfadeTimeouts()
+    this.clearSimpleMoonTransitionTimeout()
+    this.clearMoonTransitionBloomResetTimeout()
+    this.abandonInFlightFullChainTransition()
+
+    audioDiag('drone-lifecycle', 'old stopping graph force-silenced before restart', {
+      reason,
+      contextState: this.getContextState(),
+    })
+  }
+
   holdAudioParamAtTime(param, time = Tone.now()) {
     if (!param) {
       return
@@ -4830,6 +4953,15 @@ export class DroneEngine {
     const entry = { voices, timeoutId: null }
 
     entry.timeoutId = window.setTimeout(() => {
+      // If a Stop/restart already retired this set (disposeAllOutgoingVoiceSets), do not dispose
+      // its voices a second time — that stale teardown would touch already-freed nodes.
+      if (!this.outgoingNoteCrossfadeVoiceSets.includes(entry)) {
+        audioDiag('drone-lifecycle', 'stale drone teardown ignored', {
+          reason: 'outgoing voice set already retired',
+        })
+        return
+      }
+
       this.removeOutgoingVoiceSet(entry)
     }, disposeDelayMs)
 
@@ -11873,6 +12005,10 @@ export class DroneEngine {
     this.metronomePlaying = false
     this.metronomeMeasureBeatIndex = 0
     this.metronomePendingMeter = null
+    // Reset so a stopped metronome does not report a stale scheduled-beat count in diagnostics.
+    // (startMetronome resets this again before each run; the UI honesty gate also requires
+    // metronomePlaying + schedulerActive, so this is purely to keep stopped state truthful.)
+    this.metronomeBeatsScheduledTotal = 0
 
     this.stopMetronomeScheduler()
     this.cancelPendingMetronomeClicks()
