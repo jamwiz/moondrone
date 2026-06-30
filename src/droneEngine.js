@@ -4,6 +4,7 @@ import { configureNativePlaybackSession, isNativePlaybackActive, isNativePlaybac
 import { ensurePrimerPlaying, getPrimerDebugState, isIosNative, isPrimerPlaying } from './iosMediaPrimer'
 import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
 import { AudioHealth, setAudioHealth, scheduleAudioStable } from './audioHealth'
+import { ENABLE_IOS_BACKGROUND_AUDIO } from './backgroundAudioConfig'
 import {
   DEFAULT_METRONOME_METER,
   DEFAULT_METRONOME_SOUND_MODE,
@@ -368,6 +369,11 @@ export class DroneEngine {
     // Guards the graceful lifecycle stop so duplicate inactive/hidden/pagehide events do not
     // double-teardown. Reset after the deferred teardown completes.
     this.lifecycleStopInProgress = false
+    // Set whenever audio was torn down by an UNSAFE path (lifecycle stop, hard reset while
+    // playing/starting, active interruption with background audio disabled). Forces the next Play to
+    // push media-primer-before + drone-post-context through the native-configure throttle. Cleared
+    // only after a confirmed successful start (context running, no immediate interruption).
+    this.forceSafeForegroundPlayPending = false
     this.noteCrossfadeEndsAt = 0
     this.noteCrossfadeTimeoutIds = []
     // Each in-flight crossfade's outgoing voices get their own dispose timer here
@@ -414,6 +420,10 @@ export class DroneEngine {
     this.metronomeUsesSampleFallback = false
     this.metronomeFallbackOsc = null
     this.metronomeFallbackVolume = null
+    // iOS oscillator-primary clicks are strictly one-shot: each click spawns its own oscillator +
+    // envelope gain which are stopped and disposed after release. This set tracks any that are still
+    // alive so stop/teardown can force-silence them (no continuously-running oscillator leaks a tone).
+    this.activeMetronomeClicks = new Set()
     this.droneMetronomeHeadroomDb = 0
     this.transitionDiagnosticsEnabled = false
     this.pendingBinauralTransitionRamp = null
@@ -596,6 +606,17 @@ export class DroneEngine {
       this.breath = breath
       this.currentReverbWet = reverbWetPercent / 100
       this.ensureSignalChain()
+      // Clear any lifecycle/emergency mute or low level left on the final output by an unsafe stop,
+      // so this fresh start is actually audible.
+      if (this.masterFinalOutputTrim) {
+        try {
+          this.masterFinalOutputTrim.mute = false
+          this.masterFinalOutputTrim.volume.cancelScheduledValues(Tone.now())
+          this.masterFinalOutputTrim.volume.value = this.getToneLabFinalOutputTrimDb()
+        } catch {
+          // Node may be mid-build; ignore.
+        }
+      }
       // A prior Moon-change fade may have been interrupted by Stop; make sure the whole
       // drone bus starts at unity so Play is audible.
       this.clearSimpleMoonTransitionTimeout()
@@ -9178,6 +9199,18 @@ export class DroneEngine {
       return
     }
 
+    // Background audio is DISABLED: an iOS interruption can land before our lifecycle pause/hidden
+    // handler runs. Deferring recovery here leaves a window where iOS suspends/cuts the audio before
+    // we can declick → pop/glitch. Instead, when audio is active (and we are past startup guard),
+    // immediately run an emergency stop and force the next Play onto the safe foreground path. We do
+    // NOT schedule a normal recovery for this case.
+    if (!ENABLE_IOS_BACKGROUND_AUDIO
+      && (this.metronomePlaying || this.isPlaying)
+      && (reason === 'interruption-began' || reason === 'context-interrupted' || reason === 'native')) {
+      this.emergencyStopForActiveInterruption(reason)
+      return
+    }
+
     // Audio active (drone OR metronome), after startup guard: do not hard-reset immediately.
     // Debounce and try to recover the AudioContext via the shared recovery path; the metronome
     // scheduler pauses ticks while interrupted and resyncs on recovery. This is what stops a
@@ -9231,6 +9264,13 @@ export class DroneEngine {
     // Health: a confirmed interruption tore down the graph. Treat as failed so the next start does
     // a full safe startup rather than trusting a stale running/ready snapshot.
     setAudioHealth(AudioHealth.FAILED, `hard-reset:${reason}`)
+
+    // A hard reset while playing/starting (incl. interrupted restart-during-stop-fade) is unsafe —
+    // force the next Play to re-assert the native session past the throttle.
+    if (wasPlaying || wasMetronomePlaying || this.isStarting) {
+      this.forceSafeForegroundPlayPending = true
+      this.lifecycleStopPendingPlay = true
+    }
 
     console.warn('[Moondrone audio-interruption] iOS pulled audio focus — hard reset', {
       reason,
@@ -9286,6 +9326,8 @@ export class DroneEngine {
   // rebuilds fresh nodes (the old ones were wired to a now-disposed master limiter).
   disposeMetronomeChain() {
     this.stopMetronome()
+    // Make sure no one-shot click oscillator survives the chain teardown.
+    this.forceSilenceActiveMetronomeClicks()
 
     const nodes = [
       this.metronomeFallbackOsc,
@@ -11369,36 +11411,131 @@ export class DroneEngine {
     return failures
   }
 
+  // No persistent oscillator: one-shot clicks own their own nodes. This only guarantees the metronome
+  // processing chain (trim → EQ → softclip → gain → master) exists for clicks to connect into.
   ensureMetronomeFallbackClick() {
-    if (this.metronomeFallbackVolume) {
+    this.buildMetronomeProcessingChain()
+  }
+
+  // Force-stop and dispose a single one-shot click's oscillator + envelope gain. Idempotent.
+  disposeMetronomeClick(clickRef, { logTag = 'metronome oscillator one-shot disposed' } = {}) {
+    if (!clickRef || clickRef.disposed) {
       return
     }
+    clickRef.disposed = true
 
-    this.metronomeFallbackOsc = new Tone.Oscillator({
-      type: 'sine',
-      frequency: METRONOME_CLICK_FREQUENCY,
-    })
-    this.metronomeFallbackVolume = new Tone.Volume(-100)
-    this.metronomeFallbackOsc.connect(this.metronomeFallbackVolume)
-    this.metronomeFallbackVolume.connect(this.metronomeTrim)
-    this.metronomeFallbackOsc.start()
+    if (clickRef.disposeTimer) {
+      window.clearTimeout(clickRef.disposeTimer)
+      clickRef.disposeTimer = null
+    }
+
+    const { osc, env } = clickRef
+    try {
+      osc.onstop = null
+    } catch {
+      // no-op
+    }
+    try {
+      osc.stop()
+    } catch {
+      // Already stopped / never started — fine.
+    }
+    try {
+      osc.disconnect()
+    } catch {
+      // no-op
+    }
+    try {
+      osc.dispose()
+    } catch {
+      // no-op
+    }
+    if (env?.gain) {
+      try {
+        env.gain.cancelScheduledValues(Tone.now())
+        env.gain.value = 0
+      } catch {
+        // no-op
+      }
+    }
+    try {
+      env?.disconnect()
+    } catch {
+      // no-op
+    }
+    try {
+      env?.dispose()
+    } catch {
+      // no-op
+    }
+
+    this.activeMetronomeClicks?.delete(clickRef)
+
+    if ((this.metronomeClickDisposeLogCount ?? 0) < 4) {
+      this.metronomeClickDisposeLogCount = (this.metronomeClickDisposeLogCount ?? 0) + 1
+      audioDiag('metronome-tick', logTag, {
+        remaining: this.activeMetronomeClicks?.size ?? 0,
+        contextState: this.getContextState(),
+      })
+    }
   }
 
   triggerMetronomeFallbackClick(time, targetDb) {
-    if (!this.metronomeFallbackVolume) {
+    // Stale-click protection: never spawn a click once the metronome is stopped. (Clicks are primed
+    // before the scheduler interval is created, so we do NOT require metronomeTimer here.)
+    if (!this.metronomeTrim || !this.metronomePlaying) {
+      audioDiag('metronome-tick', 'stale metronome oscillator skipped/disposed', {
+        metronomePlaying: this.metronomePlaying === true,
+        schedulerActive: Boolean(this.metronomeTimer),
+        contextState: this.getContextState(),
+      })
       return
     }
 
-    const volumeParam = this.metronomeFallbackVolume.volume
+    const generation = this.metronomeStartupGeneration
+    const releaseSeconds = 0.05
 
-    volumeParam.cancelScheduledValues(time)
-    volumeParam.setValueAtTime(targetDb + METRONOME_ATTACK_SOFTENING_DB, time)
-    volumeParam.linearRampToValueAtTime(targetDb, time + METRONOME_ATTACK_RAMP_SECONDS)
-    volumeParam.exponentialRampToValueAtTime(-100, time + 0.045)
+    // Strictly one-shot: dedicated oscillator → envelope gain (starts at 0) → metronome chain input.
+    const osc = new Tone.Oscillator({ type: 'sine', frequency: METRONOME_CLICK_FREQUENCY })
+    const env = new Tone.Gain(0)
+    osc.connect(env)
+    env.connect(this.metronomeTrim)
+
+    const targetLinear = Math.max(0.0001, Tone.dbToGain(targetDb))
+    const attackStartLinear = Math.max(0.0001, Tone.dbToGain(targetDb + METRONOME_ATTACK_SOFTENING_DB))
+    const gainParam = env.gain
+    gainParam.cancelScheduledValues(time)
+    gainParam.setValueAtTime(0, time)
+    gainParam.linearRampToValueAtTime(attackStartLinear, time + METRONOME_ATTACK_RAMP_SECONDS)
+    gainParam.linearRampToValueAtTime(targetLinear, time + METRONOME_ATTACK_RAMP_SECONDS + 0.001)
+    gainParam.exponentialRampToValueAtTime(0.0001, time + 0.045)
+    gainParam.setValueAtTime(0, time + releaseSeconds)
+
+    osc.start(time)
+    osc.stop(time + releaseSeconds + 0.01)
+
+    const clickRef = { osc, env, generation, disposed: false, disposeTimer: null }
+    this.activeMetronomeClicks.add(clickRef)
+
+    // Primary disposal: when the oscillator actually stops (context running). Stale-protection: if
+    // the metronome generation changed while this was scheduled, dispose immediately regardless.
+    osc.onstop = () => {
+      const stale = generation !== this.metronomeStartupGeneration || !this.metronomePlaying
+      this.disposeMetronomeClick(clickRef, {
+        logTag: stale ? 'stale metronome oscillator skipped/disposed' : 'metronome oscillator one-shot disposed',
+      })
+    }
+
+    // Fallback disposal: if the context is interrupted/suspended before `stop` fires, onstop never
+    // runs — force-dispose on a wall-clock timer so no node leaks.
+    const wallClockMs = Math.max(0, (time + releaseSeconds + 0.02 - Tone.now()) * 1000) + 60
+    clickRef.disposeTimer = window.setTimeout(() => {
+      clickRef.disposeTimer = null
+      this.disposeMetronomeClick(clickRef)
+    }, wallClockMs)
 
     this.metronomeBeatsScheduledTotal = (this.metronomeBeatsScheduledTotal ?? 0) + 1
 
-    // Temporary debug: prove the oscillator click is actually scheduled (first few only).
     if ((this.metronomeClickLogCount ?? 0) < 8) {
       this.metronomeClickLogCount = (this.metronomeClickLogCount ?? 0) + 1
       audioDiag('metronome-tick', 'metronome oscillator click started', {
@@ -11408,6 +11545,20 @@ export class DroneEngine {
         primerPlaying: isPrimerPlaying(),
       })
     }
+  }
+
+  // Force-stop and dispose every active one-shot click immediately (used by stop/teardown).
+  forceSilenceActiveMetronomeClicks() {
+    if (!this.activeMetronomeClicks || this.activeMetronomeClicks.size === 0) {
+      return 0
+    }
+
+    const count = this.activeMetronomeClicks.size
+    Array.from(this.activeMetronomeClicks).forEach((clickRef) => {
+      this.disposeMetronomeClick(clickRef, { logTag: 'stale metronome oscillator skipped/disposed' })
+    })
+    this.activeMetronomeClicks.clear()
+    return count
   }
 
   activateMetronomeSampleFallback(reason, details = {}) {
@@ -12194,6 +12345,7 @@ export class DroneEngine {
     this.nextMetronomeBeatTime = Tone.now() + 0.05
     this.metronomeBeatsScheduledTotal = 0
     this.metronomeClickLogCount = 0
+    this.metronomeClickDisposeLogCount = 0
     this.metronomeTickLogCount = 0
     this.primeMetronomeSchedule(METRONOME_TRANSITION_PRIME_SECONDS)
     this.startMetronomeScheduler()
@@ -12274,42 +12426,37 @@ export class DroneEngine {
   }
 
   cancelPendingMetronomeClicks() {
-    // iOS oscillator-primary: cancel any future scheduled click envelopes and release the running
-    // click oscillator to silence with a tiny declick. Without this, a click whose down-ramp was
-    // scheduled past the stop (lookahead) can leave the oscillator sustained at an audible level —
-    // the "high tone after stop" bug. We silence the dedicated click volume only; the oscillator
-    // keeps running at -100 dB and is disposed later by disposeMetronomeChain (never the master).
-    if (this.metronomeFallbackVolume) {
-      const volumeParam = this.metronomeFallbackVolume.volume
-      const now = Tone.now()
-      let wasAudible = false
-
-      try {
-        const currentDb = typeof volumeParam.getValueAtTime === 'function'
-          ? volumeParam.getValueAtTime(now)
-          : volumeParam.value
-        wasAudible = currentDb > -60
-
-        if (typeof volumeParam.cancelAndHoldAtTime === 'function') {
-          volumeParam.cancelAndHoldAtTime(now)
-        } else {
-          volumeParam.cancelScheduledValues(now)
-        }
-        volumeParam.linearRampToValueAtTime(-100, now + 0.02)
-      } catch {
-        // Param may be mid-teardown; the chain dispose will finish silencing it.
-      }
-
-      if (wasAudible) {
-        audioDiag('metronome-engine', 'metronome stop active click oscillators released', {
-          contextState: this.getContextState(),
-        })
-      }
-
-      audioDiag('metronome-engine', 'metronome oscillator cleanup complete', {
+    // iOS oscillator-primary: clicks are one-shot oscillators that own their own envelope gain.
+    // Force-stop + dispose every active one (including any scheduled just ahead via lookahead) so
+    // nothing keeps running and leaks a sustained high tone after stop. This NEVER touches the
+    // shared master/drone output — only the metronome's own click nodes and metronome branch level.
+    const released = this.forceSilenceActiveMetronomeClicks()
+    if (released > 0) {
+      audioDiag('metronome-engine', 'metronome stop active click oscillators released', {
+        released,
         contextState: this.getContextState(),
       })
     }
+
+    // Belt-and-suspenders: cancel any automation on the metronome branch nodes (no source feeds them
+    // once clicks are disposed) and leave them at their steady level for the next start.
+    const now = Tone.now()
+    try {
+      if (this.metronomeGain) {
+        this.metronomeGain.volume.cancelScheduledValues(now)
+        this.metronomeGain.volume.value = METRONOME_OUTPUT_DB
+      }
+      if (this.metronomeTrim) {
+        this.metronomeTrim.volume.cancelScheduledValues(now)
+        this.metronomeTrim.volume.value = METRONOME_TRIM_DB
+      }
+    } catch {
+      // Nodes may be mid-teardown; ignore.
+    }
+
+    audioDiag('metronome-engine', 'metronome force-silenced on stop', {
+      contextState: this.getContextState(),
+    })
 
     if (!this.metronomePlayerPools) {
       return
@@ -12416,6 +12563,100 @@ export class DroneEngine {
     this.applyDroneMetronomeHeadroom()
   }
 
+  // Background audio disabled + active audio interrupted by iOS (outside startup guard): iOS may be
+  // about to suspend us, so do NOT defer recovery. Stop immediately (best-effort declick), make the
+  // UI honest via onPlaybackInterrupted, and force the next Play onto the safe foreground path. No
+  // normal recovery is scheduled for this case.
+  emergencyStopForActiveInterruption(reason) {
+    const wasPlaying = this.isPlaying
+    const wasMetronomePlaying = this.metronomePlaying
+
+    audioDiag('lifecycle', 'active iOS interruption with background audio disabled — emergency stop', {
+      reason,
+      wasPlaying,
+      wasMetronomePlaying,
+      contextState: this.getContextState(),
+    })
+
+    // Mark stopped intent + invalidate any in-flight startup/recovery callbacks immediately.
+    this.isPlaying = false
+    this.metronomePlaying = false
+    this.isStarting = false
+    this.droneExplicitlyStopped = true
+    this.lastDroneStopAt = Date.now()
+    this.lifecycleStopPendingPlay = true
+    this.forceSafeForegroundPlayPending = true
+    this.bumpDroneOpGeneration('emergency-interrupt-stop')
+    this.metronomeStartupGeneration += 1
+
+    // Cancel startup/recovery timers — do NOT schedule normal recovery here.
+    if (this.contextInterruptDebounceTimer) {
+      window.clearTimeout(this.contextInterruptDebounceTimer)
+      this.contextInterruptDebounceTimer = null
+    }
+    this.contextInterruptRecoveryInFlight = false
+    this.metronomeContextRecoveryDeadline = 0
+    this.metronomeStartupRecoveryPending = false
+    this.clearMetronomePrimerWatchdog()
+
+    // Stop metronome scheduling + release the click oscillator.
+    this.stopMetronomeScheduler()
+    this.cancelPendingMetronomeClicks()
+
+    // Silence the final output immediately. If the context is still running, a tiny declick avoids a
+    // pop; if it is already interrupted/suspended, set it low + mute outright (best effort).
+    const contextRunning = this.getContextState() === 'running'
+    if (this.masterFinalOutputTrim) {
+      try {
+        const now = Tone.now()
+        this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
+        if (contextRunning) {
+          this.rampParam(this.masterFinalOutputTrim.volume, -60, 0.04)
+        } else {
+          this.masterFinalOutputTrim.volume.value = -60
+          this.masterFinalOutputTrim.mute = true
+        }
+      } catch {
+        // Output may be mid-teardown; ignore.
+      }
+    }
+    if (this.reverb?.wet) {
+      try {
+        const now = Tone.now()
+        this.reverb.wet.cancelScheduledValues(now)
+        if (contextRunning) {
+          this.reverb.wet.linearRampToValueAtTime(0, now + 0.04)
+        } else {
+          this.reverb.wet.value = 0
+        }
+      } catch {
+        // Reverb may be mid-teardown; ignore.
+      }
+    }
+
+    // Tear down the graph shortly after (lets a running-context declick render first). The App's
+    // onPlaybackInterrupted handler below makes the UI honest and pauses the primer.
+    window.setTimeout(() => {
+      this.stopForLifecycle()
+      if (this.masterFinalOutputTrim) {
+        try {
+          this.masterFinalOutputTrim.volume.cancelScheduledValues(Tone.now())
+          this.masterFinalOutputTrim.volume.value = this.getToneLabFinalOutputTrimDb()
+        } catch {
+          // Node may be mid-teardown; ignore.
+        }
+      }
+    }, contextRunning ? 60 : 0)
+
+    if (this.onPlaybackInterrupted) {
+      try {
+        this.onPlaybackInterrupted({ wasPlaying, wasMetronomePlaying })
+      } catch {
+        // UI hook failure must never break audio teardown.
+      }
+    }
+  }
+
   // Background audio is disabled: when the app backgrounds/locks/goes inactive, stop cleanly with a
   // short declick instead of a hard reset. Reflects "stopped" intent synchronously (so a deferred
   // teardown frozen by iOS cannot desync resume logic), declicks the audible output, then tears the
@@ -12427,10 +12668,20 @@ export class DroneEngine {
     // Idempotent: duplicate inactive/hidden/pagehide events must not double-teardown. If a stop is
     // already in progress, or there is genuinely nothing to stop, skip.
     if (this.lifecycleStopInProgress || (!wasPlaying && !wasMetronomePlaying)) {
+      // Even when we skip the teardown, if the context is in a bad state (interrupted/suspended) or
+      // health is failed/uncertain, the prior stop/interruption was unsafe — force the next Play
+      // onto the safe foreground startup path so it re-asserts the native session.
+      const contextState = this.getContextState()
+      if (contextState !== 'running') {
+        this.forceSafeForegroundPlayPending = true
+        this.lifecycleStopPendingPlay = true
+      }
       audioDiag('lifecycle', 'lifecycle graceful stop skipped — already stopped/in progress', {
         lifecycleStopInProgress: this.lifecycleStopInProgress === true,
         wasPlaying,
         wasMetronomePlaying,
+        contextState,
+        forceSafeForegroundPlayPending: this.forceSafeForegroundPlayPending === true,
       })
       return { wasPlaying, wasMetronomePlaying }
     }
@@ -12451,6 +12702,7 @@ export class DroneEngine {
     this.droneExplicitlyStopped = true
     this.lastDroneStopAt = Date.now()
     this.lifecycleStopPendingPlay = true
+    this.forceSafeForegroundPlayPending = true
     this.bumpDroneOpGeneration('lifecycle-stop')
     this.metronomeStartupGeneration += 1
 

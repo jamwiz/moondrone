@@ -6,6 +6,7 @@ import { configureNativePlaybackSession, getNativeSessionDebugState } from './na
 import { isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
 import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
 import { msSinceUserAudioAction } from './audioActivity'
+import { ENABLE_IOS_BACKGROUND_AUDIO } from './backgroundAudioConfig'
 
 // Snapshot used by every lifecycle diagnostic so the debug panel can show what the app saw at
 // each background/foreground transition.
@@ -35,12 +36,9 @@ function lifecycleSnapshot(extra = {}) {
   }
 }
 
-// Background audio is intentionally DISABLED. Keeping Moondrone playing in the background under
-// WKWebView/TestFlight was too glitchy (pops, context interruptions, frozen metronome timing, and
-// "UI playing but silent" states). When the app backgrounds/locks/goes inactive we now stop cleanly
-// and make the UI honest; the next Play is a clean foreground start. Do NOT flip this back on
-// without also restoring UIBackgroundModes `audio` in ios/App/App/Info.plist.
-export const ENABLE_IOS_BACKGROUND_AUDIO = false
+// Background audio policy lives in its own leaf module so the audio engine can read it too (without
+// an import cycle). Re-exported here for existing importers.
+export { ENABLE_IOS_BACKGROUND_AUDIO }
 
 // Temporary diagnostics for foreground resume — set true locally when debugging lifecycle resume.
 const BACKGROUND_AUDIO_RESUME_DEBUG = false

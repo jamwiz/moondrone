@@ -387,11 +387,12 @@ function App() {
       setAudioHealth(AudioHealth.STARTING, 'drone-play')
     }
 
-    // First foreground Play after a background stop: resume intentionally did NOT prewarm, so this
+    // First foreground Play after any UNSAFE audio teardown (background stop, hard reset, active
+    // interruption with background audio disabled): resume intentionally did NOT prewarm, so this
     // gesture must own the native session setup. Force the media-primer-before + drone-post-context
-    // configure calls to bypass the recent-Playback throttle (otherwise both get skipped and the
-    // drone can be silent despite a "running" context).
-    if (droneEngine.lifecycleStopPendingPlay) {
+    // configure calls past the recent-Playback throttle (otherwise both get skipped and the drone
+    // can be silent despite a "running" context).
+    if (droneEngine.forceSafeForegroundPlayPending || droneEngine.lifecycleStopPendingPlay) {
       forceNextNativePlaybackConfigure()
     }
 
@@ -424,6 +425,9 @@ function App() {
         throw new Error('AudioContext not running after drone start')
       }
 
+      // Confirmed running context (no immediate interruption) — clear the forced-safe-start flag.
+      droneEngine.forceSafeForegroundPlayPending = false
+      droneEngine.lifecycleStopPendingPlay = false
       setIsPlaying(true)
       setIsDroneStarting(false)
       if (!audioAlreadyLive) {
@@ -434,6 +438,8 @@ function App() {
     } catch (error) {
       audioDiag('drone', 'handlePlay failed', { message: error?.message ?? String(error) })
       setAudioHealth(AudioHealth.FAILED, 'drone-play-failed')
+      // Start did not confirm a running context — keep next Play forced onto the safe path.
+      droneEngine.forceSafeForegroundPlayPending = true
       setIsPlaying(false)
       setIsDroneStarting(false)
       if (!audioAlreadyLive) {
@@ -525,6 +531,11 @@ function App() {
       beginMediaPrimerStartup('drone-key-change-start')
       setAudioHealth(AudioHealth.STARTING, 'drone-key-change-start')
     }
+
+    if (droneEngine.forceSafeForegroundPlayPending || droneEngine.lifecycleStopPendingPlay) {
+      forceNextNativePlaybackConfigure()
+    }
+
     let guardEnded = audioAlreadyLive
 
     try {
@@ -552,6 +563,8 @@ function App() {
         throw new Error('AudioContext not running after drone start')
       }
 
+      droneEngine.forceSafeForegroundPlayPending = false
+      droneEngine.lifecycleStopPendingPlay = false
       setIsPlaying(true)
       if (!audioAlreadyLive) {
         endMediaPrimerStartup('drone-key-change-start-success')
@@ -561,6 +574,7 @@ function App() {
     } catch (error) {
       audioDiag('drone', 'handleKeyChange start failed', { message: error?.message ?? String(error) })
       setAudioHealth(AudioHealth.FAILED, 'drone-key-change-failed')
+      droneEngine.forceSafeForegroundPlayPending = true
       setIsPlaying(false)
       if (!audioAlreadyLive) {
         endMediaPrimerStartup('drone-key-change-failed', { immediate: true })
@@ -689,6 +703,12 @@ function App() {
     if (!droneAlreadyRunning) {
       beginMediaPrimerStartup('metronome-play')
       setAudioHealth(AudioHealth.STARTING, 'metronome-play')
+
+      // First audio after an unsafe teardown (background/interruption/hard reset): force the native
+      // configure calls past the throttle so the session is genuinely re-asserted.
+      if (droneEngine.forceSafeForegroundPlayPending || droneEngine.lifecycleStopPendingPlay) {
+        forceNextNativePlaybackConfigure()
+      }
     }
     let guardEnded = droneAlreadyRunning
 
@@ -756,6 +776,9 @@ function App() {
         primer: getPrimerDebugState(),
       })
       setIsMetronomePlaying(true)
+      // Confirmed stable metronome start re-asserted the native session — clear the forced flag.
+      droneEngine.forceSafeForegroundPlayPending = false
+      droneEngine.lifecycleStopPendingPlay = false
       if (!droneAlreadyRunning) {
         endMediaPrimerStartup('metronome-play-success')
       }
