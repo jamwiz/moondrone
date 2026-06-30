@@ -638,25 +638,39 @@ function App() {
 
       droneEngine.setMetronomeSoundMode(metronomeSoundMode)
       droneEngine.setMetronomeMeter(metronomeMeter)
-      await droneEngine.startMetronome(metronomeBpm, {
+      // Fast audible start ONLY when the shared session is genuinely stable (drone already running).
+      // Cold / uncertain / interrupted / recovering / failed → engine prepares silently and starts
+      // the audible scheduler only after its settle/recovery window confirms stability.
+      const startResult = await droneEngine.startMetronome(metronomeBpm, {
         operationToken,
         skipNativeReconfigure: droneAlreadyRunning,
+        fastAudibleStart: droneAlreadyRunning,
       })
 
       if (!isMetronomeOperationCurrent(operationToken)) {
         audioDiag('metronome', 'stale metronome operation ignored', { phase: 'after-startMetronome' })
-        droneEngine.stopMetronome()
+        droneEngine.stopMetronome({ droneActive: isPlaying })
         return
       }
 
       if (!isMetronomeEngineReady()) {
-        droneEngine.stopMetronome()
+        droneEngine.stopMetronome({ droneActive: isPlaying })
         throw new Error('Metronome failed — context, scheduler, beats, or primer not ready after start')
       }
 
-      // The engine's startup stabilization recovers once before resolving, so if health was not
-      // stable on entry we only reach here after a clean recovery — note it for the log trail.
+      // UI truth gate: never show metronome playing while audio health is not stable. The engine
+      // sets health stable at the audible-scheduler start (after its settle/recovery window), so by
+      // here it should be stable; if not, keep UI false and treat as a failed start.
       if (!isAudioHealthStable()) {
+        audioDiag('metronome', 'metronome UI true delayed — health not stable', {
+          health: getAudioHealth(),
+          ...droneEngine.getMetronomeDiagnostics?.(),
+        })
+        droneEngine.stopMetronome({ droneActive: isPlaying })
+        throw new Error('Metronome health not stable — not setting UI playing')
+      }
+
+      if (startResult?.startupRecovered) {
         audioDiag('metronome', 'metronome startup recovered before UI true', {
           health: getAudioHealth(),
           ...droneEngine.getMetronomeDiagnostics?.(),
@@ -671,7 +685,6 @@ function App() {
         primer: getPrimerDebugState(),
       })
       setIsMetronomePlaying(true)
-      scheduleAudioStable(600, () => droneEngine.getContextState?.() === 'running', 'metronome-play-success')
       if (!droneAlreadyRunning) {
         endMediaPrimerStartup('metronome-play-success')
       }
@@ -695,14 +708,17 @@ function App() {
         primer: getPrimerDebugState(),
       })
       console.error('[Moondrone metronome] start failed', error)
-      droneEngine.stopMetronome()
+      droneEngine.stopMetronome({ droneActive: isPlaying })
       setIsMetronomePlaying(false)
-      // Mark health failed so a subsequent drone Play does a full clean startup instead of trusting
-      // a stale running/ready snapshot left behind by the failed metronome attempt.
-      setAudioHealth(AudioHealth.FAILED, 'metronome-play-failed')
-      audioDiag('metronome', 'metronome startup failed — allowing clean drone start', {
-        health: getAudioHealth(),
-      })
+      // Only poison shared health when the drone is NOT playing. If the drone is live, a failed
+      // metronome attempt must not mark the shared session failed (that would needlessly force the
+      // drone onto a heavy path / imply it is broken).
+      if (!isPlaying) {
+        setAudioHealth(AudioHealth.FAILED, 'metronome-play-failed')
+        audioDiag('metronome', 'metronome startup failed — allowing clean drone start', {
+          health: getAudioHealth(),
+        })
+      }
       if (!droneAlreadyRunning) {
         endMediaPrimerStartup('metronome-play-failed', { immediate: true })
       }
@@ -723,11 +739,18 @@ function App() {
     beginMetronomeOperation('stop')
     metronomeStartPendingRef.current = false
 
-    droneEngine.stopMetronome()
+    const droneActive = isPlaying || droneEngine.isPlaying === true
+    droneEngine.stopMetronome({ droneActive })
     setIsMetronomePlaying(false)
 
-    // Keep the primer alive if the drone is still playing; otherwise we are now idle.
-    if (!isPlaying) {
+    if (droneActive) {
+      // Drone is still playing: leave the primer alone (pausing it during active drone playback can
+      // provoke iOS/session weirdness) and verify/repair the drone output immediately so we never
+      // depend on a background/resume to bring the drone back.
+      audioDiag('metronome', 'metronome stop skipped primer pause — drone active')
+      droneEngine.verifyDroneOutputAfterMetronomeStop?.()
+    } else {
+      // Now idle — pause the primer.
       pausePrimer('metronome-stop', { force: true })
     }
   }

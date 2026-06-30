@@ -8971,7 +8971,9 @@ export class DroneEngine {
   }
 
   scheduleContextInterruptRecovery(reason) {
-    if (this.metronomePlaying && !this.metronomeContextRecoveryDeadline) {
+    // Recovery deadline applies whenever audio is active (drone OR metronome): retry recovery up to
+    // the deadline before falling back to a hard reset, instead of hard-resetting on first failure.
+    if ((this.metronomePlaying || this.isPlaying) && !this.metronomeContextRecoveryDeadline) {
       this.metronomeContextRecoveryDeadline = Date.now() + 5000
     }
 
@@ -9043,23 +9045,25 @@ export class DroneEngine {
         return false
       }
 
-      // Metronome running: debounce + retry recovery until the deadline. The scheduler pauses
-      // ticks (does not schedule against a frozen clock) until the context is back. Only after
-      // the recovery window clearly fails do we hard-reset.
-      if (this.metronomePlaying) {
+      // Audio active (drone OR metronome): debounce + retry recovery until the deadline. The
+      // metronome scheduler pauses ticks (does not schedule against a frozen clock) until the
+      // context is back. Only after the recovery window clearly fails do we hard-reset.
+      if (this.metronomePlaying || this.isPlaying) {
         const now = Date.now()
 
         if (now < this.metronomeContextRecoveryDeadline) {
-          audioDiag('metronome-engine', 'context still interrupted — metronome recovery retry (scheduler paused)', {
+          audioDiag('metronome-engine', 'context still interrupted — audio recovery retry (no hard reset yet)', {
             reason,
             stateAfter,
+            droneIsPlaying: this.isPlaying,
+            metronomePlaying: this.metronomePlaying,
             msRemaining: this.metronomeContextRecoveryDeadline - now,
           })
           this.scheduleContextInterruptRecovery(reason)
           return false
         }
 
-        audioDiag('metronome-engine', 'metronome context recovery timed out — hard reset', { reason, stateAfter })
+        audioDiag('metronome-engine', 'audio context recovery timed out — hard reset', { reason, stateAfter })
         this.metronomeContextRecoveryDeadline = 0
       }
 
@@ -9102,12 +9106,17 @@ export class DroneEngine {
       return
     }
 
-    // Metronome running (after startup guard): do not hard-reset immediately. Debounce and try to
-    // recover the AudioContext; the scheduler pauses ticks while interrupted and resyncs on recovery.
-    if (this.metronomePlaying
+    // Audio active (drone OR metronome), after startup guard: do not hard-reset immediately.
+    // Debounce and try to recover the AudioContext via the shared recovery path; the metronome
+    // scheduler pauses ticks while interrupted and resyncs on recovery. This is what stops a
+    // transient interruption (e.g. around metronome stop, or a background blip) from killing the
+    // drone — only a recovery that fails past the deadline hard-resets.
+    if ((this.metronomePlaying || this.isPlaying)
       && (reason === 'interruption-began' || reason === 'context-interrupted' || reason === 'native')) {
-      audioDiag('metronome-engine', 'interruption during metronome — debounce + recover (no immediate hard reset)', {
+      audioDiag('metronome-engine', 'background interruption while audio active — recovery deferred, no hard reset', {
         reason,
+        droneIsPlaying: this.isPlaying,
+        metronomePlaying: this.metronomePlaying,
         contextState: this.getContextState(),
       })
       this.scheduleContextInterruptRecovery(reason)
@@ -11907,7 +11916,11 @@ export class DroneEngine {
     this.fillMetronomeScheduleUntil(now + METRONOME_LOOKAHEAD_SECONDS, now)
   }
 
-  async startMetronome(bpm = this.metronomeBpm, { operationToken = null, skipNativeReconfigure = false } = {}) {
+  async startMetronome(bpm = this.metronomeBpm, {
+    operationToken = null,
+    skipNativeReconfigure = false,
+    fastAudibleStart = false,
+  } = {}) {
     this.metronomeStartOperationToken = operationToken
     this.metronomeStartupGeneration += 1
     this.metronomeStartupRecoveryPending = false
@@ -12004,7 +12017,80 @@ export class DroneEngine {
 
     this.metronomeActiveMeter = this.metronomeMeter
     this.metronomePendingMeter = null
+
+    let startupRecovered = false
+
+    if (fastAudibleStart) {
+      // Stable shared audio (drone already running on a healthy session) — start the audible
+      // scheduler immediately. No settle window needed; reconfigure was already skipped.
+      if (!this.beginAudibleMetronomeScheduler(operationToken, startupGeneration, 'fast-stable')) {
+        throw new Error('stale metronome startup generation before audible scheduler')
+      }
+    } else {
+      // Cold / uncertain / interrupted / recovering / failed: PREPARE only. Do NOT schedule any
+      // audible click until the settle/recovery window confirms the context is stable — this is what
+      // removes the one-click-then-restart double-click pattern (no click before stability).
+      audioDiag('metronome-engine', 'metronome cold startup prepared — waiting for stable audio', {
+        contextState: this.getContextState(),
+        startupGeneration,
+      })
+      audioDiag('metronome-engine', 'metronome audible scheduler delayed until stable', { startupGeneration })
+
+      const stable = await this.waitForMetronomeStartupStable(operationToken, startupGeneration)
+      if (stable.stale) {
+        throw new Error('stale metronome operation during startup wait')
+      }
+      if (!stable.ok) {
+        audioDiag('metronome-engine', 'metronome startup failed — no scheduler started', {
+          contextState: this.getContextState(),
+          startupGeneration,
+        })
+        this.clearMetronomeSchedulerForRestart('startup-failed')
+        throw new Error('Metronome startup did not stabilize — context not running')
+      }
+      startupRecovered = stable.recovered === true
+
+      if (!this.beginAudibleMetronomeScheduler(operationToken, startupGeneration, 'stable-after-wait')) {
+        throw new Error('stale metronome startup generation before audible scheduler')
+      }
+    }
+
+    // Final reality: running context + live scheduler + at least one beat scheduled by the clock.
+    const schedulerReal = Boolean(this.metronomeTimer) && (this.metronomeBeatsScheduledTotal ?? 0) > 0
+    if (this.getContextState() !== 'running' || !schedulerReal) {
+      this.clearMetronomeSchedulerForRestart('post-start-verify-failed')
+      throw new Error('Metronome scheduler failed to start with running context and scheduled beats')
+    }
+
+    return { ...this.getMetronomeDiagnostics(), startupRecovered }
+  }
+
+  // Start the AUDIBLE metronome scheduler exactly once per successful startup generation. Resets all
+  // beat/scheduling state first (no stale primed beat / catch-up burst), then marks audio health
+  // stable — the caller has already confirmed the context is running for this generation.
+  beginAudibleMetronomeScheduler(operationToken, startupGeneration, reason) {
+    if (startupGeneration !== this.metronomeStartupGeneration
+      || !this.assertMetronomeOperationCurrent('begin-audible-scheduler', operationToken)) {
+      audioDiag('metronome-engine', 'metronome scheduler start ignored — stale startup generation', {
+        reason,
+        startupGeneration,
+        currentGeneration: this.metronomeStartupGeneration,
+      })
+      return false
+    }
+
+    if (this.getContextState() !== 'running') {
+      audioDiag('metronome-engine', 'metronome scheduler start ignored — context not running', {
+        reason,
+        contextState: this.getContextState(),
+      })
+      return false
+    }
+
+    // Clean slate: no stale next-beat time, beat index, primed beats, or counters.
     this.metronomeMeasureBeatIndex = 0
+    this.metronomeNeedsResync = false
+    this.metronomeContextStallLogged = false
     this.metronomePlaying = true
     this.applyDroneMetronomeHeadroom()
     this.nextMetronomeBeatTime = Tone.now() + 0.05
@@ -12012,70 +12098,45 @@ export class DroneEngine {
     this.metronomeClickLogCount = 0
     this.metronomeTickLogCount = 0
     this.primeMetronomeSchedule(METRONOME_TRANSITION_PRIME_SECONDS)
-    audioDiag('metronome-engine', 'before startMetronomeScheduler()', {
-      contextState: this.getContextState(),
-      primer: getPrimerDebugState(),
-      primerPlaying: isPrimerPlaying(),
-      beatsScheduled: this.metronomeBeatsScheduledTotal,
-    })
     this.startMetronomeScheduler()
     this.logMetronomeSchedulerStartDiagnostics()
     this.scheduleMetronomePrimerWatchdog(operationToken)
-    audioDiag('metronome-engine', 'startMetronome DONE — scheduler running', {
+
+    setAudioHealth(AudioHealth.STABLE, `metronome-audible-start:${reason}`)
+    audioDiag('metronome-engine', 'metronome startup stable — starting audible scheduler', {
+      reason,
       contextState: this.getContextState(),
       schedulerActive: Boolean(this.metronomeTimer),
-      metronomePlaying: this.metronomePlaying,
-      primerPlaying: isPrimerPlaying(),
       beatsScheduled: this.metronomeBeatsScheduledTotal,
+      startupGeneration,
     })
-
-    // Immediate gate: the repeating scheduler callback must exist. We do NOT yet require beats>0 or
-    // a running context here — iOS often interrupts in the first few hundred ms of metronome-first
-    // startup, which would make this throw and produce the one-click-then-silence failure. Instead
-    // we stabilize (recover once) below before declaring success.
-    if (!this.metronomeTimer) {
-      this.clearMetronomeSchedulerForRestart('post-start-verify-failed')
-      throw new Error('Metronome scheduler failed to start')
-    }
-
-    const stabilized = await this.stabilizeMetronomeStartup(operationToken, startupGeneration)
-    if (stabilized.stale) {
-      throw new Error('stale metronome operation during startup stabilize')
-    }
-    if (!stabilized.ok) {
-      throw new Error('Metronome startup did not stabilize — context not running')
-    }
-
-    // Final reality after stabilization: running context + live scheduler + at least one beat
-    // actually scheduled by the (now healthy) clock.
-    const schedulerReal = Boolean(this.metronomeTimer) && (this.metronomeBeatsScheduledTotal ?? 0) > 0
-    if (this.getContextState() !== 'running' || !schedulerReal) {
-      this.clearMetronomeSchedulerForRestart('post-stabilize-verify-failed')
-      throw new Error('Metronome scheduler failed to start with running context and scheduled beats')
-    }
-
-    return this.getMetronomeDiagnostics()
+    return true
   }
 
-  // Single-owner stabilization for the metronome startup window. Waits a short settle, and if the
-  // context interrupted/suspended in that window, recovers exactly ONCE (guarded by the startup
-  // generation so a superseded start cannot recover, and so watchdog/statechange/native handlers do
-  // not each resync). On recovery, flags a single scheduler resync from the next clean beat.
-  async stabilizeMetronomeStartup(operationToken, startupGeneration) {
+  // Wait through the settle window WITHOUT any audible scheduler running. If the context interrupts
+  // before the audible scheduler starts, recover exactly ONCE (generation-guarded so a superseded
+  // start, watchdog, statechange, or native handler cannot double-recover). Returns
+  // { ok, stale, recovered }.
+  async waitForMetronomeStartupStable(operationToken, startupGeneration) {
     const SETTLE_MS = 400
 
     await new Promise((resolve) => {
       window.setTimeout(resolve, SETTLE_MS)
     })
 
-    if (!this.assertMetronomeOperationCurrent('startup-stabilize', operationToken)
+    if (!this.assertMetronomeOperationCurrent('startup-wait', operationToken)
       || startupGeneration !== this.metronomeStartupGeneration) {
       return { ok: false, stale: true }
     }
 
     if (this.getContextState() === 'running') {
-      return { ok: true }
+      return { ok: true, recovered: false }
     }
+
+    audioDiag('metronome-engine', 'metronome startup interrupted before audible scheduler', {
+      contextState: this.getContextState(),
+      startupGeneration,
+    })
 
     if (this.metronomeStartupRecoveryPending) {
       audioDiag('metronome-engine', 'metronome startup recovery already pending', {
@@ -12084,42 +12145,16 @@ export class DroneEngine {
       })
     } else {
       this.metronomeStartupRecoveryPending = true
-      audioDiag('metronome-engine', 'metronome startup interruption detected', {
-        contextState: this.getContextState(),
-        startupGeneration,
-      })
       await this.attemptContextInterruptRecovery('metronome-startup')
+      this.metronomeStartupRecoveryPending = false
     }
 
-    if (!this.assertMetronomeOperationCurrent('startup-stabilize-post-recovery', operationToken)
+    if (!this.assertMetronomeOperationCurrent('startup-wait-post-recovery', operationToken)
       || startupGeneration !== this.metronomeStartupGeneration) {
-      this.metronomeStartupRecoveryPending = false
       return { ok: false, stale: true }
     }
 
-    this.metronomeStartupRecoveryPending = false
-
-    if (this.getContextState() === 'running') {
-      // One resync from the next clean beat (no catch-up burst), then prime immediately so the
-      // post-stabilize reality gate sees a scheduled beat without waiting for the next interval.
-      this.metronomeNeedsResync = true
-      this.metronomeContextStallLogged = false
-      if (this.metronomePlaying && this.metronomeTimer) {
-        this.scheduleMetronomeBeats()
-      }
-      audioDiag('metronome-engine', 'metronome startup recovered — scheduler resynced', {
-        contextState: this.getContextState(),
-        startupGeneration,
-      })
-      return { ok: true }
-    }
-
-    audioDiag('metronome-engine', 'metronome startup failed — clearing scheduler', {
-      contextState: this.getContextState(),
-      startupGeneration,
-    })
-    this.clearMetronomeSchedulerForRestart('startup-failed')
-    return { ok: false }
+    return { ok: this.getContextState() === 'running', recovered: true }
   }
 
   cancelPendingMetronomeClicks() {
@@ -12135,9 +12170,24 @@ export class DroneEngine {
     })
   }
 
-  stopMetronome() {
+  // Metronome-only teardown. Touches ONLY metronome state/timer/click nodes plus the shared output
+  // *level* (to remove the metronome headroom and restore the drone's gain). It must never dispose
+  // or disconnect shared master/drone nodes, rebuild masterChain, mute final output, suspend the
+  // context, hard reset, reconfigure the native session, or mark audio health failed.
+  stopMetronome({ droneActive = false } = {}) {
+    if (droneActive) {
+      audioDiag('metronome-engine', 'metronome stop while drone active — preserving shared output', {
+        contextState: this.getContextState(),
+        isReady: this.isReady,
+      })
+    }
+
     this.clearMetronomePrimerWatchdog()
     this.metronomeStartOperationToken = null
+    // Advance the startup generation so any in-flight startup wait/recovery for this metronome is
+    // treated as stale and cannot start an audible scheduler after we have stopped.
+    this.metronomeStartupGeneration += 1
+    this.metronomeStartupRecoveryPending = false
     this.metronomeContextRecoveryDeadline = 0
     this.metronomeNeedsResync = false
     this.metronomeContextStallLogged = false
@@ -12151,6 +12201,65 @@ export class DroneEngine {
 
     this.stopMetronomeScheduler()
     this.cancelPendingMetronomeClicks()
+    // Restores the drone's master output level (removes metronome headroom). This is the ONLY shared
+    // write and it ramps the level UP — it never silences or disconnects the drone.
+    this.applyDroneMetronomeHeadroom()
+
+    audioDiag('metronome-engine', 'metronome stop cleanup — metronome branch only', {
+      contextState: this.getContextState(),
+      droneActive,
+      droneIsReady: this.isReady,
+      droneIsPlaying: this.isPlaying,
+    })
+  }
+
+  // Requirement G: after a metronome Stop while the drone should keep playing, verify the drone's
+  // output is actually healthy and repair it immediately (do NOT wait for background/resume).
+  verifyDroneOutputAfterMetronomeStop() {
+    if (!this.isPlaying) {
+      return
+    }
+
+    const contextState = this.getContextState()
+    audioDiag('metronome-engine', 'post-metronome-stop drone output check', {
+      contextState,
+      isReady: this.isReady,
+      masterChainReady: this.masterChainReady,
+    })
+
+    // Context interrupted/suspended while the drone should be playing — recover NOW via the shared
+    // recovery path rather than waiting for an accidental background/resume recovery.
+    if (contextState !== 'running') {
+      audioDiag('metronome-engine', 'drone output repair after metronome stop', { contextState })
+      this.scheduleContextInterruptRecovery('post-metronome-stop')
+      return
+    }
+
+    // Context running but the drone graph is gone (disposed/disconnected) — we cannot silently
+    // repair audio nodes that no longer exist, so force an honest UI state + allow a clean restart.
+    if (!this.isReady || !this.masterChainReady || !this.output) {
+      audioDiag('metronome-engine', 'drone output silent while UI playing — forcing honest state', {
+        contextState,
+        isReady: this.isReady,
+        masterChainReady: this.masterChainReady,
+      })
+      this.isPlaying = false
+      if (this.onPlaybackInterrupted) {
+        try {
+          this.onPlaybackInterrupted({ wasPlaying: true, wasMetronomePlaying: false })
+        } catch {
+          // UI hook failure must never break audio.
+        }
+      }
+      return
+    }
+
+    // Context running and graph intact — re-assert the drone output level as a cheap repair in case
+    // the headroom math or a stale ramp left it low. applyVolume()/headroom both ramp, no click.
+    audioDiag('metronome-engine', 'drone output repair after metronome stop', {
+      contextState,
+      repair: 'reassert-output-level',
+    })
     this.applyDroneMetronomeHeadroom()
   }
 

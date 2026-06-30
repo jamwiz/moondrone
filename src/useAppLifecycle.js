@@ -148,7 +148,14 @@ function handleResumeHealthCheck(source, uiIsPlaying, uiIsMetronomePlaying) {
       contextState,
       health: getAudioHealth(),
     })
-    void droneEngine.attemptContextInterruptRecovery?.(`resume-${source}`)
+    void Promise.resolve(droneEngine.attemptContextInterruptRecovery?.(`resume-${source}`)).then((recovered) => {
+      if (recovered && (droneEngine.isPlaying === true || droneEngine.metronomePlaying === true)) {
+        audioDiag('lifecycle', 'resume recovered active audio — no UI reset', {
+          source,
+          contextState: droneEngine.getContextState?.() ?? 'unknown',
+        })
+      }
+    }).catch(() => {})
     return
   }
 
