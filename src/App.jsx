@@ -25,6 +25,13 @@ import { addNativeAudioSessionListeners, configureNativePlaybackSession } from '
 import { ensurePrimerPlaying, getPrimerDebugState, isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
 import { markUserAudioAction } from './audioActivity'
 import {
+  AudioHealth,
+  getAudioHealth,
+  isAudioHealthStable,
+  setAudioHealth,
+  scheduleAudioStable,
+} from './audioHealth'
+import {
   beginMediaPrimerStartup,
   endMediaPrimerStartup,
   isMediaPrimerStartupActive,
@@ -286,15 +293,35 @@ function App() {
     audioDiag('media-primer', `primeForPlayback END (${reason})`, getPrimerDebugState())
   }
 
-  // True when audio is already live: a running AudioContext plus either a built master chain (a
-  // drone has played) or an active metronome. In that case a new Play should start lightweight —
-  // no media primer, no startup guard, no native reconfigure — mirroring the drone→metronome path.
+  // True only when the shared audio system is genuinely healthy enough for a lightweight start
+  // (no primer, no startup guard, no native reconfigure). masterChainReady alone does NOT qualify:
+  // after a metronome stop or an interruption/recovery the chain can exist while the session is not
+  // truly healthy. We require audio health == stable AND either the drone engine is ready on a
+  // running context, OR the metronome is actively scheduling on a running context.
   function isAudioAlreadyLive() {
+    if (!isAudioHealthStable()) {
+      audioDiag('drone', 'drone lightweight start denied — audio health not stable', {
+        health: getAudioHealth(),
+      })
+      return false
+    }
+
     const diag = droneEngine.getMetronomeDiagnostics?.() ?? {}
-    return diag.contextState === 'running'
-      && (diag.masterChainReady === true
-        || diag.metronomePlaying === true
-        || diag.schedulerActive === true)
+    const contextRunning = diag.contextState === 'running'
+    const droneReady = diag.isReady === true && contextRunning
+    const metronomeLive = diag.metronomePlaying === true
+      && diag.schedulerActive === true
+      && contextRunning
+
+    if (droneReady || metronomeLive) {
+      return true
+    }
+
+    audioDiag('drone', 'drone lightweight start denied — drone not ready and metronome not active', {
+      health: getAudioHealth(),
+      ...diag,
+    })
+    return false
   }
 
   function isMetronomeEngineReady() {
@@ -329,6 +356,7 @@ function App() {
     const audioAlreadyLive = isAudioAlreadyLive()
     if (!audioAlreadyLive) {
       beginMediaPrimerStartup('drone-play')
+      setAudioHealth(AudioHealth.STARTING, 'drone-play')
     }
     let guardEnded = audioAlreadyLive
 
@@ -364,9 +392,11 @@ function App() {
       if (!audioAlreadyLive) {
         endMediaPrimerStartup('drone-play-success')
       }
+      scheduleAudioStable(600, () => droneEngine.getContextState?.() === 'running', 'drone-play-success')
       guardEnded = true
     } catch (error) {
       audioDiag('drone', 'handlePlay failed', { message: error?.message ?? String(error) })
+      setAudioHealth(AudioHealth.FAILED, 'drone-play-failed')
       setIsPlaying(false)
       setIsDroneStarting(false)
       if (!audioAlreadyLive) {
@@ -422,6 +452,7 @@ function App() {
     const audioAlreadyLive = isAudioAlreadyLive()
     if (!audioAlreadyLive) {
       beginMediaPrimerStartup('drone-key-change-start')
+      setAudioHealth(AudioHealth.STARTING, 'drone-key-change-start')
     }
     let guardEnded = audioAlreadyLive
 
@@ -454,9 +485,11 @@ function App() {
       if (!audioAlreadyLive) {
         endMediaPrimerStartup('drone-key-change-start-success')
       }
+      scheduleAudioStable(600, () => droneEngine.getContextState?.() === 'running', 'drone-key-change-success')
       guardEnded = true
     } catch (error) {
       audioDiag('drone', 'handleKeyChange start failed', { message: error?.message ?? String(error) })
+      setAudioHealth(AudioHealth.FAILED, 'drone-key-change-failed')
       setIsPlaying(false)
       if (!audioAlreadyLive) {
         endMediaPrimerStartup('drone-key-change-failed', { immediate: true })
@@ -573,14 +606,18 @@ function App() {
     // the metronome against that live session: do NOT re-prime media or reconfigure the native
     // session, which can emit an interruption that disrupts the drone. The primer is NOT required
     // for this decision (it may already be paused while the drone plays fine).
+    // Lightweight "metronome over running drone" path requires genuinely healthy shared audio —
+    // not just masterChainReady. After an interruption/recovery or a prior failure, force a safe
+    // start instead of trusting a stale running/ready snapshot.
     const droneDiag = droneEngine.getMetronomeDiagnostics?.() ?? {}
     const droneAlreadyRunning = isPlaying
+      && isAudioHealthStable()
       && droneDiag.contextState === 'running'
       && droneDiag.isReady === true
-      && droneDiag.masterChainReady === true
 
     if (!droneAlreadyRunning) {
       beginMediaPrimerStartup('metronome-play')
+      setAudioHealth(AudioHealth.STARTING, 'metronome-play')
     }
     let guardEnded = droneAlreadyRunning
 
@@ -617,6 +654,15 @@ function App() {
         throw new Error('Metronome failed — context, scheduler, beats, or primer not ready after start')
       }
 
+      // The engine's startup stabilization recovers once before resolving, so if health was not
+      // stable on entry we only reach here after a clean recovery — note it for the log trail.
+      if (!isAudioHealthStable()) {
+        audioDiag('metronome', 'metronome startup recovered before UI true', {
+          health: getAudioHealth(),
+          ...droneEngine.getMetronomeDiagnostics?.(),
+        })
+      }
+
       audioDiag('metronome', 'startMetronome resolved — setting UI isMetronomePlaying=true', {
         uiIsMetronomePlayingBefore: isMetronomePlaying,
         operationToken,
@@ -625,6 +671,7 @@ function App() {
         primer: getPrimerDebugState(),
       })
       setIsMetronomePlaying(true)
+      scheduleAudioStable(600, () => droneEngine.getContextState?.() === 'running', 'metronome-play-success')
       if (!droneAlreadyRunning) {
         endMediaPrimerStartup('metronome-play-success')
       }
@@ -650,6 +697,12 @@ function App() {
       console.error('[Moondrone metronome] start failed', error)
       droneEngine.stopMetronome()
       setIsMetronomePlaying(false)
+      // Mark health failed so a subsequent drone Play does a full clean startup instead of trusting
+      // a stale running/ready snapshot left behind by the failed metronome attempt.
+      setAudioHealth(AudioHealth.FAILED, 'metronome-play-failed')
+      audioDiag('metronome', 'metronome startup failed — allowing clean drone start', {
+        health: getAudioHealth(),
+      })
       if (!droneAlreadyRunning) {
         endMediaPrimerStartup('metronome-play-failed', { immediate: true })
       }

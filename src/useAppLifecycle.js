@@ -6,6 +6,7 @@ import { configureNativePlaybackSession, getNativeSessionDebugState } from './na
 import { isPrimerPlaying } from './iosMediaPrimer'
 import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
 import { msSinceUserAudioAction } from './audioActivity'
+import { getAudioHealth } from './audioHealth'
 
 // Snapshot used by every lifecycle diagnostic so the debug panel can show what the app saw at
 // each background/foreground transition.
@@ -119,6 +120,40 @@ function prewarmNativePlaybackSession(source) {
 
   audioDiag('native-prewarm', `prewarm native Playback session (${source})`)
   void configureNativePlaybackSession(`prewarm-${source}`, { throttle: true })
+}
+
+// On app resume, verify rather than blindly prewarm/reconfigure:
+//   - audio active + context running   -> leave it alone (do not touch the session)
+//   - audio active + context not running -> run the shared recovery path ONCE
+//   - idle                              -> prewarm through the strict gate
+function handleResumeHealthCheck(source, uiIsPlaying, uiIsMetronomePlaying) {
+  const audioWasActive = uiIsPlaying === true
+    || uiIsMetronomePlaying === true
+    || droneEngine.isPlaying === true
+    || droneEngine.metronomePlaying === true
+  const contextState = droneEngine.getContextState?.() ?? 'unknown'
+
+  if (audioWasActive) {
+    if (contextState === 'running') {
+      audioDiag('lifecycle', 'resume health check — audio active, no prewarm', {
+        source,
+        contextState,
+        health: getAudioHealth(),
+      })
+      return
+    }
+
+    audioDiag('lifecycle', 'resume health check — recovering interrupted audio', {
+      source,
+      contextState,
+      health: getAudioHealth(),
+    })
+    void droneEngine.attemptContextInterruptRecovery?.(`resume-${source}`)
+    return
+  }
+
+  audioDiag('lifecycle', 'resume health check — idle prewarm allowed', { source, contextState })
+  prewarmNativePlaybackSession(source)
 }
 
 function logBackgroundAudioResume(source, details) {
@@ -296,10 +331,7 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
           }
 
           audioDiag('lifecycle', 'app resume / active', lifecycleSnapshot())
-          prewarmNativePlaybackSession('appStateChange-active')
-          if (shouldAllowIosBackgroundPlayback()) {
-            void attemptForegroundResume('appStateChange-active', uiIsPlaying, uiIsMetronomePlaying)
-          }
+          handleResumeHealthCheck('appStateChange-active', uiIsPlaying, uiIsMetronomePlaying)
         }).then((handle) => {
           if (cancelled) {
             handle.remove()

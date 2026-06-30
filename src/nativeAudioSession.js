@@ -32,6 +32,22 @@ export function isIosNative() {
   }
 }
 
+// True when the last native result was Playback (the session is currently in the right category).
+export function isNativePlaybackActive() {
+  return Boolean(
+    nativeSessionDebug.lastResult
+    && nativeSessionDebug.lastResult.category === 'AVAudioSessionCategoryPlayback',
+  )
+}
+
+// True when Playback is active AND was (re)configured within the throttle window — i.e. a fresh
+// reconfigure would be redundant churn. Used to skip metronome-post-context after a recent prewarm
+// or media-primer-before configure.
+export function isNativePlaybackRecentlyConfigured() {
+  return isNativePlaybackActive()
+    && Date.now() - lastPlaybackConfiguredAt < NATIVE_SESSION_THROTTLE_MS
+}
+
 function setNativeSessionDebug({ result, error, registrationStatus }) {
   if (result !== undefined) {
     nativeSessionDebug.lastResult = result
