@@ -386,9 +386,15 @@ export class DroneEngine {
     // clean running window. While true, a late/stale context recovery must NOT mark audio health
     // stable (that is what left "sound-on while UI says ready"). Cleared when a fresh start commits.
     this.foregroundStartupFailed = false
-    // Post-lock/cold-startup micro-fade phase for interruption timing diagnostics: 'none' | 'begin' | 'complete'
+    // Post-lock/cold-startup anti-click micro-fade, tracked PER drone start generation so stale
+    // completions cannot mislabel a later startup's interruption:
+    //   state: 'none' | 'armed' (silenced, ramp not begun) | 'begin' (ramping) | 'complete'
+    //   armed: when true, the next ensureMasterOutput() creates masterFinalOutputTrim at -60 dB
+    //   generation: the droneOpGeneration that owns the current micro-fade
     this.startupMicroFadeState = 'none'
     this.startupMicroFadeReason = null
+    this.startupMicroFadeArmed = false
+    this.startupMicroFadeGeneration = -1
     // Reversible early "duck" applied on the native willResignActive pre-warning (before Capacitor's
     // appStateChange-inactive). If the app truly backgrounds, the full lifecycle stop supersedes it;
     // if the app returns active (transient resign — Control Center, banner), it is ramped back up.
@@ -551,8 +557,6 @@ export class DroneEngine {
     this.isStarting = true
     // Marker for the post-start stable-confirmation window (detects interruptions during this Play).
     this.currentPlayStartedAt = Date.now()
-    this.startupMicroFadeState = 'none'
-    this.startupMicroFadeReason = null
     // Fresh start attempt — clear any prior failed-startup latch so a genuine recovery can mark
     // stable again.
     this.foregroundStartupFailed = false
@@ -567,6 +571,21 @@ export class DroneEngine {
     }
 
     const opToken = this.bumpDroneOpGeneration('start')
+
+    // Reset micro-fade diagnostics for THIS generation so a prior generation's 'complete' state
+    // cannot mislabel this startup's interruptions. ARM phase (silence) happens here — as early as
+    // possible, before Tone.start() and before any audible node connects.
+    this.startupMicroFadeState = 'none'
+    this.startupMicroFadeReason = null
+    this.startupMicroFadeArmed = false
+    this.startupMicroFadeGeneration = opToken
+    if (applyStartupMicroFade) {
+      this.armStartupMicroFade({
+        reason: startupMicroFadeReason,
+        postLock: postLockStartupMicroFade,
+        generation: opToken,
+      })
+    }
 
     // Restart-during-shutdown: Play arrived while a Stop fade-out / teardown is still pending.
     // Silence the old graph NOW so it cannot bleed through during this start's async work.
@@ -635,11 +654,11 @@ export class DroneEngine {
       this.breath = breath
       this.currentReverbWet = reverbWetPercent / 100
       this.ensureSignalChain()
-      // Final-output anti-click: on full startup (incl. post-lock cold rebuild), ramp the master trim
-      // from near-silence to target over ~65ms so the graph edge does not click. Does NOT wait for
-      // confirmStableStartWindow — scheduling only, zero Play delay.
+      // OPEN phase of the anti-click micro-fade: the graph is built (trim was armed silent at the top
+      // of start() / at trim creation), so ramp -60 → target over ~65ms now. Scheduling only — does
+      // NOT wait for confirmStableStartWindow and does NOT delay Play.
       if (applyStartupMicroFade) {
-        this.applyStartupMicroFade({ reason: startupMicroFadeReason, postLock: postLockStartupMicroFade })
+        this.openStartupMicroFade({ reason: startupMicroFadeReason, postLock: postLockStartupMicroFade })
       } else if (this.masterFinalOutputTrim) {
         audioDiag('drone-engine', 'post-lock startup micro-fade skipped — normal start', {
           reason: startupMicroFadeReason,
@@ -741,6 +760,10 @@ export class DroneEngine {
       this.commitPendingStartupNoteAfterPlay(scheduledKey, scheduledOctave)
     } finally {
       this.isStarting = false
+      // Bound the armed flag to this start() body: if we bailed stale before the OPEN ramp, a newer
+      // start (which bumped the generation) owns output, so this flag must not leak into a later
+      // ensureMasterOutput() and silence unrelated audio (e.g. a metronome-only start).
+      this.startupMicroFadeArmed = false
       this.pendingStartupNote = null
     }
   }
@@ -9372,6 +9395,10 @@ export class DroneEngine {
       isReady: this.isReady,
     })
 
+    // The trim is being disposed/recreated — clear any armed micro-fade so a later ensureMasterOutput
+    // (e.g. a metronome-only start) does not create the fresh trim silent and mute unrelated audio.
+    this.startupMicroFadeArmed = false
+
     // 1. Mute the final output first so the teardown itself cannot click.
     try {
       if (this.masterFinalOutputTrim) {
@@ -10824,6 +10851,8 @@ export class DroneEngine {
       // → post-limiter trim → destination. No compressor/saturator/makeup/pre-shelf/metering exist.
       this.masterFinalOutputTrim = new Tone.Volume(this.getToneLabFinalOutputTrimDb())
       this.connectMasterFinalOutputToDestination()
+      // If a startup micro-fade is armed, create the trim silent before any source connects.
+      this.initFinalOutputSilentIfArmed('ensure-master-output-bypass')
       this.masterLimiter = new Tone.Limiter(LEGACY_MASTER_LIMITER_DB).connect(this.masterFinalOutputTrim)
       // masterPreLowShelf is the node ensureSignalChain connects the drone output to,
       // so alias the pass-through gain to it. metronomeGain connects to masterLimiter.
@@ -10850,6 +10879,8 @@ export class DroneEngine {
       }
     this.masterFinalOutputTrim = new Tone.Volume(this.getToneLabFinalOutputTrimDb())
     this.connectMasterFinalOutputToDestination()
+    // If a startup micro-fade is armed, create the trim silent before any source connects.
+    this.initFinalOutputSilentIfArmed('ensure-master-output')
     this.masterLimiter = new Tone.Limiter(this.getEffectiveLimiterCeilingDb()).connect(this.masterFinalOutputTrim)
     this.masterMakeup = new Tone.Volume(compressorSettings.makeupGainDb).connect(this.masterLimiter)
     this.masterSaturator = this.createMasterSaturator()
@@ -12793,19 +12824,75 @@ export class DroneEngine {
     }
   }
 
-  // Tiny anti-click ramp on the final master trim for full startup (post-lock/cold rebuild and normal
-  // cold Play). Schedules -60 → target over ~65ms on masterFinalOutputTrim (whole drone bus). Does
-  // NOT block Play or wait for confirmStableStartWindow.
-  applyStartupMicroFade({ reason = 'startup', postLock = false } = {}) {
+  // ARM phase: as early as possible in a full startup (before Tone.start / any audible node), mark
+  // the final output to start silent. If masterFinalOutputTrim already exists, silence it now;
+  // otherwise the armed flag makes ensureMasterOutput() create it at -60 dB before anything connects.
+  armStartupMicroFade({ reason = 'startup', postLock = false, generation = this.droneOpGeneration } = {}) {
+    this.startupMicroFadeArmed = true
+    this.startupMicroFadeState = 'armed'
+    this.startupMicroFadeReason = reason
+    this.startupMicroFadeGeneration = generation
+
+    audioDiag('drone-engine', 'post-lock startup micro-fade armed', {
+      reason,
+      postLock,
+      generation,
+      finalOutputExists: Boolean(this.masterFinalOutputTrim),
+      contextState: this.getContextState(),
+    })
+
+    this.initFinalOutputSilentIfArmed('arm')
+  }
+
+  // Initialize the final output trim to near-silence if a micro-fade is armed and the trim exists.
+  // Called from armStartupMicroFade() (if the trim is already built) and from ensureMasterOutput()
+  // right after the trim is (re)created, so a fresh/cold-rebuilt graph is silent before sources wire.
+  initFinalOutputSilentIfArmed(source = 'ensure') {
+    if (!this.startupMicroFadeArmed || !this.masterFinalOutputTrim) {
+      return false
+    }
+
+    const SILENT_DB = -60
+    let now = 0
+    try {
+      now = Tone.now()
+    } catch {
+      now = 0
+    }
+
+    try {
+      this.masterFinalOutputTrim.mute = false
+      this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
+      this.masterFinalOutputTrim.volume.setValueAtTime(SILENT_DB, now)
+      this.masterFinalOutputTrim.volume.value = SILENT_DB
+    } catch {
+      return false
+    }
+
+    audioDiag('drone-engine', 'post-lock startup output initialized silent', {
+      source,
+      reason: this.startupMicroFadeReason,
+      generation: this.startupMicroFadeGeneration,
+      contextState: this.getContextState(),
+    })
+    return true
+  }
+
+  // OPEN phase: ramp the (already-silent) final trim from -60 → target over ~65ms. Scheduling only —
+  // does NOT block Play or wait for confirmStableStartWindow. Completion is gated on the same drone
+  // start generation so a superseded startup cannot flip a later generation's diagnostics.
+  openStartupMicroFade({ reason = 'startup', postLock = false } = {}) {
     const RAMP_SECONDS = 0.065
     const SILENT_DB = -60
+    const generation = this.startupMicroFadeGeneration
 
     if (!this.masterFinalOutputTrim) {
+      this.startupMicroFadeArmed = false
       audioDiag('drone-engine', 'post-lock startup micro-fade skipped — no final output gain found', {
         reason,
         postLock,
         contextState: this.getContextState(),
-        generation: this.droneOpGeneration,
+        generation,
       })
       return false
     }
@@ -12824,15 +12911,17 @@ export class DroneEngine {
       this.masterFinalOutputTrim.volume.setValueAtTime(SILENT_DB, now)
       this.masterFinalOutputTrim.volume.linearRampToValueAtTime(targetDb, now + RAMP_SECONDS)
     } catch {
+      this.startupMicroFadeArmed = false
       audioDiag('drone-engine', 'post-lock startup micro-fade skipped — no final output gain found', {
         reason,
         postLock,
         contextState: this.getContextState(),
-        generation: this.droneOpGeneration,
+        generation,
       })
       return false
     }
 
+    this.startupMicroFadeArmed = false
     this.startupMicroFadeState = 'begin'
     this.startupMicroFadeReason = reason
 
@@ -12840,7 +12929,7 @@ export class DroneEngine {
       reason,
       postLock,
       contextState: this.getContextState(),
-      generation: this.droneOpGeneration,
+      generation,
       targetGainDb: targetDb,
       rampSeconds: RAMP_SECONDS,
     })
@@ -12848,11 +12937,12 @@ export class DroneEngine {
       reason,
       rampSeconds: RAMP_SECONDS,
       targetGainDb: targetDb,
-      generation: this.droneOpGeneration,
+      generation,
     })
 
     window.setTimeout(() => {
-      if (this.startupMicroFadeState !== 'begin') {
+      // Only complete if this same generation's fade is still the active, in-progress one.
+      if (this.startupMicroFadeGeneration !== generation || this.startupMicroFadeState !== 'begin') {
         return
       }
       this.startupMicroFadeState = 'complete'
@@ -12860,12 +12950,12 @@ export class DroneEngine {
         reason,
         postLock,
         contextState: this.getContextState(),
-        generation: this.droneOpGeneration,
+        generation,
         targetGainDb: targetDb,
       })
       audioDiag('drone-engine', 'drone audible output opened', {
         reason,
-        generation: this.droneOpGeneration,
+        generation,
       })
     }, Math.round(RAMP_SECONDS * 1000) + 15)
 
@@ -12873,17 +12963,30 @@ export class DroneEngine {
   }
 
   logStartupMicroFadeInterruptionTiming(interruptReason) {
-    if (this.startupMicroFadeState === 'none') {
+    // Only report timing for the CURRENT drone start generation. A stale prior generation's
+    // 'complete' state must never mislabel a later startup's interruption.
+    if (this.startupMicroFadeGeneration !== this.droneOpGeneration) {
       return
     }
 
-    const message = this.startupMicroFadeState === 'complete'
-      ? 'startup interruption occurred after micro-fade'
-      : 'startup interruption occurred during micro-fade'
+    const state = this.startupMicroFadeState
+    if (state === 'none') {
+      return
+    }
+
+    let message
+    if (state === 'complete') {
+      message = 'startup interruption occurred after micro-fade'
+    } else if (state === 'begin') {
+      message = 'startup interruption occurred during micro-fade'
+    } else {
+      // 'armed' — output silenced but the ramp has not begun yet.
+      message = 'startup interruption occurred before micro-fade'
+    }
 
     audioDiag('drone-engine', message, {
       interruptReason,
-      microFadeState: this.startupMicroFadeState,
+      microFadeState: state,
       microFadeReason: this.startupMicroFadeReason,
       contextState: this.getContextState(),
       isStarting: this.isStarting === true,
