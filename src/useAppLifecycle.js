@@ -319,6 +319,9 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
           }
 
           audioDiag('lifecycle', 'app resume / active', lifecycleSnapshot())
+          // If a willResignActive pre-mute ducked audio but no real background stop followed
+          // (transient resign — Control Center, banner), ramp it back up. No-op after a real stop.
+          droneEngine.restoreFromBackgroundPreMute?.('appStateChange-active')
           handleResumeHealthCheck('appStateChange-active')
         }).then((handle) => {
           if (cancelled) {

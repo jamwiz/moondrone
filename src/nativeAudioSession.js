@@ -117,6 +117,30 @@ export async function configureNativePlaybackSession(reason = 'play', { throttle
   }
 
   if (throttle && forceActive) {
+    // Startup de-duplication: a forced post-lock/background startup should configure native Playback
+    // exactly ONCE. media-primer-before does the real re-assert; the later drone-post-context call is
+    // redundant churn (which itself can emit an interruption → post-return Play pop). If a CLEAN
+    // Playback configure already landed this recently, skip the duplicate — UNLESS the category is
+    // wrong or the last configure carried an error, in which case a repeat is genuinely required.
+    const cleanPlaybackFresh = isNativePlaybackActive()
+      && Date.now() - lastPlaybackConfiguredAt < NATIVE_SESSION_THROTTLE_MS
+
+    if (cleanPlaybackFresh) {
+      audioDiag('native-audio-session', `native Playback configure skipped — already fresh for startup (${reason})`, {
+        msSinceLast: Date.now() - lastPlaybackConfiguredAt,
+      })
+      return nativeSessionDebug.lastResult
+    }
+
+    const lastCategoryWrong = nativeSessionDebug.lastResult
+      && nativeSessionDebug.lastResult.category !== 'AVAudioSessionCategoryPlayback'
+    if (nativeSessionDebug.lastResultHadError || lastCategoryWrong) {
+      audioDiag('native-audio-session', `native Playback configure repeated because category/error required it (${reason})`, {
+        lastResultHadError: nativeSessionDebug.lastResultHadError,
+        lastCategory: nativeSessionDebug.lastResult?.category ?? null,
+      })
+    }
+
     audioDiag('native-audio-session', `forcing native Playback session for foreground play after background stop (${reason})`, {
       msUntilForceExpires: forcePlaybackConfigureUntil - Date.now(),
     })
@@ -200,7 +224,7 @@ export async function testNativePlaybackBeep() {
   }
 }
 
-export function addNativeAudioSessionListeners({ onInterrupted, onInterruptionEnded } = {}) {
+export function addNativeAudioSessionListeners({ onInterrupted, onInterruptionEnded, onWillResignActive, onDidBecomeActive } = {}) {
   if (!isIosNative()) {
     return () => {}
   }
@@ -212,6 +236,24 @@ export function addNativeAudioSessionListeners({ onInterrupted, onInterruptionEn
       MoondroneAudio.addListener('audioSessionInterrupted', (data) => {
         audioDiag('native-audio-session', 'audioSessionInterrupted', data)
         onInterrupted(data)
+      }),
+    )
+  }
+
+  if (onWillResignActive) {
+    handles.push(
+      MoondroneAudio.addListener('audioWillResignActive', (data) => {
+        audioDiag('native-audio-session', 'audioWillResignActive', data)
+        onWillResignActive(data)
+      }),
+    )
+  }
+
+  if (onDidBecomeActive) {
+    handles.push(
+      MoondroneAudio.addListener('audioDidBecomeActive', (data) => {
+        audioDiag('native-audio-session', 'audioDidBecomeActive', data)
+        onDidBecomeActive(data)
       }),
     )
   }
