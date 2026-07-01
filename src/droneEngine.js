@@ -12744,7 +12744,7 @@ export class DroneEngine {
       if (this.masterFinalOutputTrim?.mute === true) {
         return false
       }
-      if (Boolean(this.contextInterruptDebounceTimer)) {
+      if (this.contextInterruptDebounceTimer) {
         return false
       }
       // Quiet = no interruption within the trailing window. An interruption before this Play does
@@ -12853,12 +12853,7 @@ export class DroneEngine {
     }
 
     const SILENT_DB = -60
-    let now = 0
-    try {
-      now = Tone.now()
-    } catch {
-      now = 0
-    }
+    const now = this.getToneNowSafe()
 
     try {
       this.masterFinalOutputTrim.mute = false
@@ -12898,12 +12893,7 @@ export class DroneEngine {
     }
 
     const targetDb = this.getToneLabFinalOutputTrimDb()
-    let now = 0
-    try {
-      now = Tone.now()
-    } catch {
-      now = 0
-    }
+    const now = this.getToneNowSafe()
 
     try {
       this.masterFinalOutputTrim.mute = false
@@ -13033,12 +13023,7 @@ export class DroneEngine {
     audioDiag('lifecycle', 'native willResignActive pre-mute requested', { reason, contextState })
 
     const RAMP = 0.012
-    let now = 0
-    try {
-      now = Tone.now()
-    } catch {
-      now = 0
-    }
+    const now = this.getToneNowSafe()
 
     if (this.masterFinalOutputTrim) {
       try {
@@ -13080,12 +13065,7 @@ export class DroneEngine {
     }
 
     const RAMP = 0.08
-    let now = 0
-    try {
-      now = Tone.now()
-    } catch {
-      now = 0
-    }
+    const now = this.getToneNowSafe()
 
     if (this.masterFinalOutputTrim) {
       try {
@@ -13114,12 +13094,7 @@ export class DroneEngine {
     // A full kill-switch supersedes any reversible pre-mute duck.
     this.backgroundPreMuteActive = false
     const contextRunning = this.getContextState() === 'running'
-    let now = 0
-    try {
-      now = Tone.now()
-    } catch {
-      now = 0
-    }
+    const now = this.getToneNowSafe()
 
     // Click-safe ramp length (~12ms). On a running context we ramp to near-silence over this window
     // instead of snapping (which clicks while the waveform is non-zero), then hard-mute just after
@@ -13797,6 +13772,24 @@ export class DroneEngine {
   // split stays intact, but now passes the same Tone Lab EQ + output trim as voices
   // and the True Orbit pair (previously this bus jumped straight to this.output,
   // bypassing Tone Lab and reading much louder / immune to masterTone knobs).
+  getToneNowSafe() {
+    try {
+      return Tone.now()
+    } catch {
+      return 0
+    }
+  }
+
+  clearForegroundStartupFlags() {
+    this.forceSafeForegroundPlayPending = false
+    this.lifecycleStopPendingPlay = false
+    this.requireColdAudioRebuildOnNextPlay = false
+  }
+
+  setSafeForegroundPlayPending(pending = true) {
+    this.forceSafeForegroundPlayPending = pending === true
+  }
+
   buildDualBeats() {
     const template = MOOD_DUAL_BEATS.super
 

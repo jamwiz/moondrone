@@ -10,27 +10,29 @@ import { ENABLE_IOS_BACKGROUND_AUDIO } from './backgroundAudioConfig'
 
 // Snapshot used by every lifecycle diagnostic so the debug panel can show what the app saw at
 // each background/foreground transition.
+function readLifecycleNativeCategory() {
+  try {
+    return getNativeSessionDebugState()?.lastResult?.category ?? 'none'
+  } catch {
+    return 'error'
+  }
+}
+
+function readLifecyclePrimerPlaying() {
+  try {
+    return isPrimerPlaying()
+  } catch {
+    return 'error'
+  }
+}
+
 function lifecycleSnapshot(extra = {}) {
-  let nativeCategory = 'unknown'
-  try {
-    nativeCategory = getNativeSessionDebugState()?.lastResult?.category ?? 'none'
-  } catch {
-    nativeCategory = 'error'
-  }
-
-  let primerPlaying = 'n/a'
-  try {
-    primerPlaying = isPrimerPlaying()
-  } catch {
-    primerPlaying = 'error'
-  }
-
   return {
     engineIsPlaying: droneEngine.isPlaying,
     contextState: droneEngine.getContextState?.() ?? 'unknown',
     documentHidden: typeof document !== 'undefined' ? document.hidden : 'n/a',
-    nativeCategory,
-    primerPlaying,
+    nativeCategory: readLifecycleNativeCategory(),
+    primerPlaying: readLifecyclePrimerPlaying(),
     iosBackgroundAudio: shouldAllowIosBackgroundPlayback(),
     ...extra,
   }

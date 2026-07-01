@@ -100,6 +100,10 @@ function toEngineVolume(uiPercent) {
   return (uiPercent / 100) * MAX_MASTER_VOLUME_NORMALIZED
 }
 
+function readPlayStartedTimestamp() {
+  return Date.now()
+}
+
 function readStoredAtmosphere() {
   try {
     const stored = window.sessionStorage.getItem(ATMOSPHERE_STORAGE_KEY)
@@ -428,7 +432,6 @@ function App() {
     }
 
     let guardEnded = audioAlreadyLive
-    const playStartedAt = Date.now()
     let primerSkippedForDiagnostic = false
 
     try {
@@ -490,6 +493,7 @@ function App() {
       // Strict post-lock/cold-rebuild confirmation ONLY. Normal Play keeps the tolerant behavior
       // above (ensureContextRunningAfterStart already recovers a transient media-primer interruption).
       if (postLockPlay) {
+        const playStartedAt = readPlayStartedTimestamp()
         const stable = await droneEngine.confirmStableStartWindow(playStartedAt)
         if (!stable) {
           audioDiag('drone', 'foreground startup failed — context interrupted after lock', {
@@ -500,9 +504,7 @@ function App() {
       }
 
       // Confirmed stable — clear all forced/cold flags.
-      droneEngine.forceSafeForegroundPlayPending = false
-      droneEngine.lifecycleStopPendingPlay = false
-      droneEngine.requireColdAudioRebuildOnNextPlay = false
+      droneEngine.clearForegroundStartupFlags()
       if (postLockPlay) {
         audioDiag('drone', 'post-lock startup success — UI playing committed', {
           contextState: droneEngine.getContextState?.(),
@@ -538,7 +540,7 @@ function App() {
       } else {
         // Normal Play failure: keep next Play forced onto the safe path, but do NOT escalate to a
         // full cold rebuild (a normal first-start media-primer interruption must not poison it).
-        droneEngine.forceSafeForegroundPlayPending = true
+        droneEngine.setSafeForegroundPlayPending(true)
       }
       setIsPlaying(false)
       setIsDroneStarting(false)
@@ -641,7 +643,6 @@ function App() {
     }
 
     let guardEnded = audioAlreadyLive
-    const playStartedAt = Date.now()
 
     try {
       if (requireColdRebuild) {
@@ -678,6 +679,7 @@ function App() {
       }
 
       if (postLockPlay) {
+        const playStartedAt = readPlayStartedTimestamp()
         const stable = await droneEngine.confirmStableStartWindow(playStartedAt)
         if (!stable) {
           audioDiag('drone', 'foreground startup failed — context interrupted after lock', {
@@ -687,9 +689,7 @@ function App() {
         }
       }
 
-      droneEngine.forceSafeForegroundPlayPending = false
-      droneEngine.lifecycleStopPendingPlay = false
-      droneEngine.requireColdAudioRebuildOnNextPlay = false
+      droneEngine.clearForegroundStartupFlags()
       setIsPlaying(true)
       if (!audioAlreadyLive) {
         endMediaPrimerStartup('drone-key-change-start-success')
@@ -702,7 +702,7 @@ function App() {
       if (postLockPlay) {
         droneEngine.abortFailedForegroundStartup('handleKeyChange-failed')
       } else {
-        droneEngine.forceSafeForegroundPlayPending = true
+        droneEngine.setSafeForegroundPlayPending(true)
       }
       setIsPlaying(false)
       if (!audioAlreadyLive) {
@@ -922,9 +922,7 @@ function App() {
       })
       setIsMetronomePlaying(true)
       // Confirmed stable metronome start re-asserted the native session — clear the forced flags.
-      droneEngine.forceSafeForegroundPlayPending = false
-      droneEngine.lifecycleStopPendingPlay = false
-      droneEngine.requireColdAudioRebuildOnNextPlay = false
+      droneEngine.clearForegroundStartupFlags()
       if (!droneAlreadyRunning) {
         endMediaPrimerStartup('metronome-play-success')
       }
