@@ -224,7 +224,7 @@ export async function testNativePlaybackBeep() {
   }
 }
 
-export function addNativeAudioSessionListeners({ onInterrupted, onInterruptionEnded } = {}) {
+export function addNativeAudioSessionListeners({ onInterrupted, onInterruptionEnded, onWillResignActive, onDidBecomeActive } = {}) {
   if (!isIosNative()) {
     return () => {}
   }
@@ -236,6 +236,24 @@ export function addNativeAudioSessionListeners({ onInterrupted, onInterruptionEn
       MoondroneAudio.addListener('audioSessionInterrupted', (data) => {
         audioDiag('native-audio-session', 'audioSessionInterrupted', data)
         onInterrupted(data)
+      }),
+    )
+  }
+
+  if (onWillResignActive) {
+    handles.push(
+      MoondroneAudio.addListener('audioWillResignActive', (data) => {
+        audioDiag('native-audio-session', 'audioWillResignActive', data)
+        onWillResignActive(data)
+      }),
+    )
+  }
+
+  if (onDidBecomeActive) {
+    handles.push(
+      MoondroneAudio.addListener('audioDidBecomeActive', (data) => {
+        audioDiag('native-audio-session', 'audioDidBecomeActive', data)
+        onDidBecomeActive(data)
       }),
     )
   }

@@ -207,6 +207,17 @@ function App() {
         audioDiag('interruption', 'native audio session interrupted', data)
         droneEngine.handleNativeAudioInterruption(data?.reason ?? 'native')
       },
+      onWillResignActive: (data) => {
+        // Earliest lifecycle warning (before appStateChange-inactive): best-effort click-safe duck
+        // while the context may still be running. Reversed on return if no real background follows.
+        droneEngine.preMuteForImminentBackground?.(data?.reason ?? 'native-will-resign-active')
+      },
+      onDidBecomeActive: (data) => {
+        // App returned active. Reverse a pre-mute duck if no real background stop happened (no-op
+        // after a real stop). Robust regardless of Capacitor appStateChange mapping for transient
+        // resigns (Control Center, banner) that may not fire appStateChange.
+        droneEngine.restoreFromBackgroundPreMute?.(data?.reason ?? 'native-did-become-active')
+      },
     })
 
     return cleanup

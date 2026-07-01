@@ -386,6 +386,10 @@ export class DroneEngine {
     // clean running window. While true, a late/stale context recovery must NOT mark audio health
     // stable (that is what left "sound-on while UI says ready"). Cleared when a fresh start commits.
     this.foregroundStartupFailed = false
+    // Reversible early "duck" applied on the native willResignActive pre-warning (before Capacitor's
+    // appStateChange-inactive). If the app truly backgrounds, the full lifecycle stop supersedes it;
+    // if the app returns active (transient resign — Control Center, banner), it is ramped back up.
+    this.backgroundPreMuteActive = false
     // Set at the moment start() commits to playing; the confirmation window measures interruptions
     // relative to this.
     this.currentPlayStartedAt = 0
@@ -12776,7 +12780,118 @@ export class DroneEngine {
   // silence EVERYTHING immediately (before any async cleanup) to avoid the background pop / glitch
   // burst / reverb tail. When the context is still running a ~10ms declick avoids the mute click
   // itself; when interrupted/suspended we snap + mute outright.
+  // Earliest-possible reversible duck, triggered by the native willResignActive notification (which
+  // can arrive before Capacitor's appStateChange-inactive / visibilitychange-hidden). We ramp the
+  // final output + reverb down with the same click-safe ~12ms ramp WHILE the context may still be
+  // running — catching pops that a later context-interrupted-only mute would miss. It does NOT pause
+  // the primer, change play intent, or tear anything down, so a transient resign (Control Center,
+  // banner) can be cleanly restored. A real background then runs the full lifecycle stop.
+  preMuteForImminentBackground(reason = 'willResignActive') {
+    if (ENABLE_IOS_BACKGROUND_AUDIO) {
+      return
+    }
+    if (!this.isPlaying && !this.metronomePlaying) {
+      audioDiag('lifecycle', 'native willResignActive pre-mute ignored — already stopped', { reason })
+      return
+    }
+
+    const contextState = this.getContextState()
+    if (contextState !== 'running') {
+      audioDiag('lifecycle', 'native willResignActive pre-mute too late — context already interrupted', {
+        reason,
+        contextState,
+      })
+      return
+    }
+
+    if (this.backgroundPreMuteActive) {
+      return
+    }
+    this.backgroundPreMuteActive = true
+
+    audioDiag('lifecycle', 'native willResignActive pre-mute requested', { reason, contextState })
+
+    const RAMP = 0.012
+    let now = 0
+    try {
+      now = Tone.now()
+    } catch {
+      now = 0
+    }
+
+    if (this.masterFinalOutputTrim) {
+      try {
+        this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
+        this.masterFinalOutputTrim.volume.setValueAtTime(this.masterFinalOutputTrim.volume.value, now)
+        this.masterFinalOutputTrim.volume.linearRampToValueAtTime(-60, now + RAMP)
+      } catch {
+        // Node may be mid-build/teardown; ignore.
+      }
+    }
+    if (this.reverb?.wet) {
+      try {
+        this.reverb.wet.cancelScheduledValues(now)
+        this.reverb.wet.setValueAtTime(this.reverb.wet.value, now)
+        this.reverb.wet.linearRampToValueAtTime(0, now + RAMP)
+      } catch {
+        // Reverb may be mid-build/teardown; ignore.
+      }
+    }
+  }
+
+  // Reverse a willResignActive pre-mute when the app returns active WITHOUT a real background stop
+  // (transient resign). No-ops if a full stop already ran (play intent cleared) or the context is not
+  // running — those cases are owned by the normal foreground startup path.
+  restoreFromBackgroundPreMute(reason = 'app-active') {
+    if (!this.backgroundPreMuteActive) {
+      return
+    }
+    this.backgroundPreMuteActive = false
+
+    if ((!this.isPlaying && !this.metronomePlaying) || this.getContextState() !== 'running') {
+      audioDiag('lifecycle', 'willResignActive pre-mute restore skipped — not playing / context not running', {
+        reason,
+        isPlaying: this.isPlaying === true,
+        metronomePlaying: this.metronomePlaying === true,
+        contextState: this.getContextState(),
+      })
+      return
+    }
+
+    const RAMP = 0.08
+    let now = 0
+    try {
+      now = Tone.now()
+    } catch {
+      now = 0
+    }
+
+    if (this.masterFinalOutputTrim) {
+      try {
+        this.masterFinalOutputTrim.mute = false
+        this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
+        this.masterFinalOutputTrim.volume.setValueAtTime(this.masterFinalOutputTrim.volume.value, now)
+        this.masterFinalOutputTrim.volume.linearRampToValueAtTime(this.getToneLabFinalOutputTrimDb(), now + RAMP)
+      } catch {
+        // Node may be mid-build/teardown; ignore.
+      }
+    }
+    if (this.reverb?.wet) {
+      try {
+        this.reverb.wet.cancelScheduledValues(now)
+        this.reverb.wet.setValueAtTime(this.reverb.wet.value, now)
+        this.reverb.wet.linearRampToValueAtTime(this.getReverbWet(), now + RAMP)
+      } catch {
+        // Reverb may be mid-build/teardown; ignore.
+      }
+    }
+
+    audioDiag('lifecycle', 'willResignActive pre-mute restored — app returned active', { reason })
+  }
+
   applyBackgroundKillSwitchMute(reason = 'background') {
+    // A full kill-switch supersedes any reversible pre-mute duck.
+    this.backgroundPreMuteActive = false
     const contextRunning = this.getContextState() === 'running'
     let now = 0
     try {
