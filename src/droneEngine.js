@@ -1,7 +1,7 @@
 import * as Tone from 'tone'
 import { audioDiag } from './audioDiagnostics'
 import { configureNativePlaybackSession, isNativePlaybackActive, isNativePlaybackRecentlyConfigured, wasLastNativeConfigureClean } from './nativeAudioSession'
-import { ensurePrimerPlaying, getPrimerDebugState, isIosNative, isPrimerPlaying } from './iosMediaPrimer'
+import { ensurePrimerPlaying, getPrimerDebugState, isIosNative, isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
 import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
 import { AudioHealth, setAudioHealth, scheduleAudioStable } from './audioHealth'
 import { ENABLE_IOS_BACKGROUND_AUDIO } from './backgroundAudioConfig'
@@ -374,6 +374,17 @@ export class DroneEngine {
     // push media-primer-before + drone-post-context through the native-configure throttle. Cleared
     // only after a confirmed successful start (context running, no immediate interruption).
     this.forceSafeForegroundPlayPending = false
+    // Stronger flag: after a lock/emergency interruption the Tone/WebAudio context is considered
+    // POISONED. The next Play must fully dispose the graph AND swap to a fresh AudioContext before a
+    // normal foreground startup — resuming/starting over the old interrupted context is unreliable.
+    // Cleared only after a confirmed stable start.
+    this.requireColdAudioRebuildOnNextPlay = false
+    // Wall-clock timestamp of the most recent iOS interruption (any active reason). Used by the
+    // post-start stable-confirmation window to detect an interruption that landed during this Play.
+    this.lastInterruptionAt = 0
+    // Set at the moment start() commits to playing; the confirmation window measures interruptions
+    // relative to this.
+    this.currentPlayStartedAt = 0
     this.noteCrossfadeEndsAt = 0
     this.noteCrossfadeTimeoutIds = []
     // Each in-flight crossfade's outgoing voices get their own dispose timer here
@@ -527,6 +538,8 @@ export class DroneEngine {
     }
 
     this.isStarting = true
+    // Marker for the post-start stable-confirmation window (detects interruptions during this Play).
+    this.currentPlayStartedAt = Date.now()
     // A clean Play clears the explicit-stop gate so lightweight paths qualify again once stable.
     this.droneExplicitlyStopped = false
 
@@ -9189,6 +9202,11 @@ export class DroneEngine {
       return
     }
 
+    // Record every interruption so the post-start stable window can tell if one landed during a Play.
+    if (reason === 'interruption-began' || reason === 'context-interrupted' || reason === 'native') {
+      this.lastInterruptionAt = Date.now()
+    }
+
     if (this.isDeferredStartupInterruption(reason)) {
       if (reason === 'interruption-began') {
         audioDiag('startup-guard', 'interruption-began ignored/deferred during media-primer startup', { reason })
@@ -9266,10 +9284,12 @@ export class DroneEngine {
     setAudioHealth(AudioHealth.FAILED, `hard-reset:${reason}`)
 
     // A hard reset while playing/starting (incl. interrupted restart-during-stop-fade) is unsafe —
-    // force the next Play to re-assert the native session past the throttle.
+    // force the next Play to re-assert the native session past the throttle AND cold-rebuild the
+    // (poisoned) context.
     if (wasPlaying || wasMetronomePlaying || this.isStarting) {
       this.forceSafeForegroundPlayPending = true
       this.lifecycleStopPendingPlay = true
+      this.requireColdAudioRebuildOnNextPlay = true
     }
 
     console.warn('[Moondrone audio-interruption] iOS pulled audio focus — hard reset', {
@@ -12563,6 +12583,173 @@ export class DroneEngine {
     this.applyDroneMetronomeHeadroom()
   }
 
+  // After a lock/emergency interruption the old Tone/WebAudio context is poisoned (stays
+  // "interrupted" and resume/start over it is unreliable). Fully tear down the graph AND swap to a
+  // fresh AudioContext so the following normal foreground startup runs from a clean slate. Called
+  // from the Play gesture (inside the startup guard) BEFORE prime/start.
+  async coldRebuildAudioContext(reason = 'lock-interruption') {
+    audioDiag('lifecycle', 'cold audio rebuild required after lock/interruption', {
+      reason,
+      contextState: this.getContextState(),
+    })
+
+    // 1. Dispose the entire drone graph + metronome branch + master stage (also force-disposes any
+    //    one-shot click oscillators and clears the metronome chain latch).
+    this.hardResetAudioGraph(`cold-rebuild:${reason}`)
+
+    // 2. Clear stale timers / recovery / generations so nothing from the old context fires.
+    if (this.contextInterruptDebounceTimer) {
+      window.clearTimeout(this.contextInterruptDebounceTimer)
+      this.contextInterruptDebounceTimer = null
+    }
+    this.contextInterruptRecoveryInFlight = false
+    this.metronomeContextRecoveryDeadline = 0
+    this.metronomeStartupRecoveryPending = false
+    this.clearMetronomePrimerWatchdog()
+    this.bumpDroneOpGeneration('cold-rebuild')
+    this.metronomeStartupGeneration += 1
+
+    // 3. Swap to a fresh AudioContext (created inside the Play user-gesture). Tone binds all new
+    //    nodes to whatever getContext() returns, so the subsequent ensureSignalChain/start rebuilds
+    //    on the clean context.
+    try {
+      const oldContext = Tone.getContext()
+      const freshContext = new Tone.Context()
+      Tone.setContext(freshContext)
+      // The state watcher was bound to the old raw context — allow re-attach to the fresh one.
+      this.contextStateWatcherAttached = false
+      this.hasStarted = false
+
+      if (typeof freshContext.resume === 'function') {
+        await freshContext.resume()
+      }
+
+      // Best-effort close of the old, poisoned context (never let this throw).
+      try {
+        await oldContext.rawContext?.close?.()
+      } catch {
+        // Old context may already be closed/closing; ignore.
+      }
+    } catch (error) {
+      audioDiag('lifecycle', 'cold audio rebuild — context swap failed (continuing on existing context)', {
+        reason,
+        error: error?.message ?? String(error),
+      })
+    }
+
+    this.ensureContextStateWatcher()
+
+    audioDiag('lifecycle', 'cold audio rebuild complete — starting foreground audio', {
+      reason,
+      contextState: this.getContextState(),
+    })
+  }
+
+  // Post-start success gate. A clean start (no interruption during this Play, no pending recovery)
+  // confirms immediately. If an interruption landed during the Play — or a recovery is pending — we
+  // require a short window where the context STAYS running, nothing re-interrupts, the drone is
+  // still the current playing generation, and the final output is not muted. Returns true only when
+  // the running state is genuinely confirmed.
+  async confirmStableStartWindow(playStartedAt, windowMs = 400) {
+    if (this.getContextState() !== 'running' || !this.isPlaying) {
+      return false
+    }
+
+    const hadInterruptionDuringPlay = (this.lastInterruptionAt ?? 0) >= (playStartedAt ?? 0)
+    const recoveryPending = Boolean(this.contextInterruptDebounceTimer)
+    const finalMuted = this.masterFinalOutputTrim?.mute === true
+
+    // Clean start — nothing suspicious happened during this Play. Confirm without added latency.
+    if (!hadInterruptionDuringPlay && !recoveryPending && !finalMuted) {
+      return true
+    }
+
+    const windowStart = Date.now()
+    await new Promise((resolve) => window.setTimeout(resolve, windowMs))
+
+    if (this.getContextState() !== 'running' || !this.isPlaying) {
+      return false
+    }
+    if (Boolean(this.contextInterruptDebounceTimer)) {
+      return false
+    }
+    if (this.masterFinalOutputTrim?.mute === true) {
+      return false
+    }
+    // A NEW interruption during the confirmation window means still unstable.
+    if ((this.lastInterruptionAt ?? 0) >= windowStart) {
+      return false
+    }
+
+    return true
+  }
+
+  // Synchronous hard safety mute — the FIRST thing any background/lock/inactive/hidden/pagehide/
+  // emergency stop path runs (background audio disabled). iOS can suspend/interrupt WebAudio before a
+  // musical fade completes, and scheduled ramps never render on an already-interrupted context, so we
+  // silence EVERYTHING immediately (before any async cleanup) to avoid the background pop / glitch
+  // burst / reverb tail. When the context is still running a ~10ms declick avoids the mute click
+  // itself; when interrupted/suspended we snap + mute outright.
+  applyBackgroundKillSwitchMute(reason = 'background') {
+    const contextRunning = this.getContextState() === 'running'
+    let now = 0
+    try {
+      now = Tone.now()
+    } catch {
+      now = 0
+    }
+
+    // Final output / master trim.
+    if (this.masterFinalOutputTrim) {
+      try {
+        this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
+        if (contextRunning) {
+          this.masterFinalOutputTrim.volume.setValueAtTime(this.masterFinalOutputTrim.volume.value, now)
+          this.masterFinalOutputTrim.volume.linearRampToValueAtTime(-60, now + 0.01)
+        } else {
+          this.masterFinalOutputTrim.volume.value = -60
+          this.masterFinalOutputTrim.mute = true
+        }
+      } catch {
+        // Output may be mid-teardown; ignore.
+      }
+    }
+
+    // Reverb wet — kill the tail immediately (the main offender on suspend).
+    if (this.reverb?.wet) {
+      try {
+        this.reverb.wet.cancelScheduledValues(now)
+        if (contextRunning) {
+          this.reverb.wet.setValueAtTime(this.reverb.wet.value, now)
+          this.reverb.wet.linearRampToValueAtTime(0, now + 0.01)
+        } else {
+          this.reverb.wet.value = 0
+        }
+      } catch {
+        // Reverb may be mid-teardown; ignore.
+      }
+    }
+
+    // Metronome branch — dispose active one-shot click oscillators (the actual sources). With the
+    // sources gone the branch gain/trim cannot produce sound, so no need to mute them (which would
+    // otherwise have to be un-muted on the next start).
+    this.forceSilenceActiveMetronomeClicks()
+
+    // Pause the media primer immediately. WebAudio is already muted above, so this cannot expose a
+    // tail; it just releases the audio route promptly.
+    try {
+      pausePrimer(`background-kill-switch:${reason}`, { force: true })
+    } catch {
+      // Primer may not be initialized; ignore.
+    }
+
+    audioDiag('lifecycle', 'background kill-switch mute applied', {
+      reason,
+      contextRunning,
+      contextState: this.getContextState(),
+    })
+  }
+
   // Background audio disabled + active audio interrupted by iOS (outside startup guard): iOS may be
   // about to suspend us, so do NOT defer recovery. Stop immediately (best-effort declick), make the
   // UI honest via onPlaybackInterrupted, and force the next Play onto the safe foreground path. No
@@ -12570,6 +12757,9 @@ export class DroneEngine {
   emergencyStopForActiveInterruption(reason) {
     const wasPlaying = this.isPlaying
     const wasMetronomePlaying = this.metronomePlaying
+
+    // KILL-SWITCH FIRST: silence all audible output synchronously before any async cleanup.
+    this.applyBackgroundKillSwitchMute(`emergency:${reason}`)
 
     audioDiag('lifecycle', 'active iOS interruption with background audio disabled — emergency stop', {
       reason,
@@ -12586,6 +12776,8 @@ export class DroneEngine {
     this.lastDroneStopAt = Date.now()
     this.lifecycleStopPendingPlay = true
     this.forceSafeForegroundPlayPending = true
+    // The context that just got interrupted is poisoned — force a cold rebuild on the next Play.
+    this.requireColdAudioRebuildOnNextPlay = true
     this.bumpDroneOpGeneration('emergency-interrupt-stop')
     this.metronomeStartupGeneration += 1
 
@@ -12603,39 +12795,9 @@ export class DroneEngine {
     this.stopMetronomeScheduler()
     this.cancelPendingMetronomeClicks()
 
-    // Silence the final output immediately. If the context is still running, a tiny declick avoids a
-    // pop; if it is already interrupted/suspended, set it low + mute outright (best effort).
-    const contextRunning = this.getContextState() === 'running'
-    if (this.masterFinalOutputTrim) {
-      try {
-        const now = Tone.now()
-        this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
-        if (contextRunning) {
-          this.rampParam(this.masterFinalOutputTrim.volume, -60, 0.04)
-        } else {
-          this.masterFinalOutputTrim.volume.value = -60
-          this.masterFinalOutputTrim.mute = true
-        }
-      } catch {
-        // Output may be mid-teardown; ignore.
-      }
-    }
-    if (this.reverb?.wet) {
-      try {
-        const now = Tone.now()
-        this.reverb.wet.cancelScheduledValues(now)
-        if (contextRunning) {
-          this.reverb.wet.linearRampToValueAtTime(0, now + 0.04)
-        } else {
-          this.reverb.wet.value = 0
-        }
-      } catch {
-        // Reverb may be mid-teardown; ignore.
-      }
-    }
-
-    // Tear down the graph shortly after (lets a running-context declick render first). The App's
-    // onPlaybackInterrupted handler below makes the UI honest and pauses the primer.
+    // Output is already muted by the kill-switch above. Delay graph/reverb disposal slightly so we
+    // do not disconnect live nodes while any last sample is still rendering. The App's
+    // onPlaybackInterrupted handler below makes the UI honest.
     window.setTimeout(() => {
       this.stopForLifecycle()
       if (this.masterFinalOutputTrim) {
@@ -12646,7 +12808,7 @@ export class DroneEngine {
           // Node may be mid-teardown; ignore.
         }
       }
-    }, contextRunning ? 60 : 0)
+    }, 90)
 
     if (this.onPlaybackInterrupted) {
       try {
@@ -12688,6 +12850,10 @@ export class DroneEngine {
 
     this.lifecycleStopInProgress = true
 
+    // KILL-SWITCH FIRST: silence all audible output synchronously before any async cleanup, so a
+    // background/lock transition stops quietly even if iOS suspends WebAudio before a fade could run.
+    this.applyBackgroundKillSwitchMute('lifecycle')
+
     audioDiag('lifecycle', 'background audio disabled — graceful stop begin', {
       wasPlaying,
       wasMetronomePlaying,
@@ -12715,33 +12881,14 @@ export class DroneEngine {
     this.metronomeStartupRecoveryPending = false
     this.clearMetronomePrimerWatchdog()
 
-    // Stop metronome scheduling immediately (no tick lands during the declick) + release the click
+    // Stop metronome scheduling immediately (no tick lands after the mute) + release the click
     // oscillator so nothing sustains.
     this.stopMetronomeScheduler()
     this.cancelPendingMetronomeClicks()
 
-    // Emergency declick: cancel scheduled automation on the final output, ramp to near-silence over
-    // ~60ms, and snap the reverb wet to 0 so no reverb tail survives the background suspension.
-    const DECLICK_SECONDS = 0.06
-    const now = Tone.now()
-    if (this.masterFinalOutputTrim) {
-      try {
-        this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
-        this.rampParam(this.masterFinalOutputTrim.volume, -60, DECLICK_SECONDS)
-      } catch {
-        // Output may be mid-teardown; ignore.
-      }
-    }
-    if (this.reverb?.wet) {
-      try {
-        this.reverb.wet.cancelScheduledValues(now)
-        this.reverb.wet.linearRampToValueAtTime(0, now + DECLICK_SECONDS)
-      } catch {
-        // Reverb may be mid-teardown; ignore.
-      }
-    }
-
-    // Tear down the graph once the declick has rendered, then restore the trim level for next Play.
+    // Output + reverb are already silenced by the kill-switch above. Delay graph/reverb disposal
+    // slightly so live nodes are not disconnected while a last sample is still rendering, then
+    // restore the trim level for next Play.
     window.setTimeout(() => {
       this.stopForLifecycle()
       if (this.masterFinalOutputTrim) {
@@ -12786,6 +12933,17 @@ export class DroneEngine {
     // Force the next Play onto the safe foreground startup path (no lightweight reuse of a stale
     // "stable" health from before the background stop).
     setAudioHealth(AudioHealth.UNCERTAIN, `resume-after-background-stop:${reason}`)
+
+    // If we resumed with the context still interrupted/suspended, it is poisoned — the next Play
+    // must cold-rebuild rather than start over it.
+    if (this.getContextState() !== 'running') {
+      this.requireColdAudioRebuildOnNextPlay = true
+      this.forceSafeForegroundPlayPending = true
+      audioDiag('lifecycle', 'resume with interrupted context — cold rebuild required on next play', {
+        reason,
+        contextState: this.getContextState(),
+      })
+    }
 
     audioDiag('lifecycle', 'background recovery timers cleared', { reason })
   }
