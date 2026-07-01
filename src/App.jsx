@@ -21,7 +21,7 @@ import { useAppLifecycle } from './useAppLifecycle'
 import { getMoonStageVisualStyle } from './moonVisuals'
 import { getMoonArtworkSrc } from './moonArtwork'
 import { audioDiag } from './audioDiagnostics'
-import { addNativeAudioSessionListeners, configureNativePlaybackSession, forceNextNativePlaybackConfigure } from './nativeAudioSession'
+import { addNativeAudioSessionListeners, configureNativePlaybackSession, forceNextNativePlaybackConfigure, isNativePlaybackActive } from './nativeAudioSession'
 import { ensurePrimerPlaying, getPrimerDebugState, isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
 import { markUserAudioAction } from './audioActivity'
 import {
@@ -89,6 +89,11 @@ const MAX_REFERENCE_A_HZ = 445
 // Reverb is no longer user-controlled — kept as a fixed subtle background space.
 // 20% maps through the engine wetness curve to a gentle ~0.09 wet signal.
 const FIXED_REVERB_PERCENT = 20
+// DIAGNOSTIC A/B: on a post-lock/cold-rebuild Play only, skip the media primer when native Playback
+// is already fresh AND the (freshly rebuilt) AudioContext is already running. Isolates whether the
+// Play-after-return click comes from the media-primer / AVAudioSession reactivation vs the drone
+// graph. Normal first-launch and non-post-lock starts always use the primer.
+const SKIP_MEDIA_PRIMER_ON_POST_LOCK_START = true
 const ATMOSPHERE_STORAGE_KEY = 'moondrone.atmosphere'
 // Mood = slow motion/behavior layer for non-binaural moons. Persisted per session.
 const MOOD_STORAGE_KEY = 'moondrone.mood'
@@ -428,6 +433,7 @@ function App() {
 
     let guardEnded = audioAlreadyLive
     const playStartedAt = Date.now()
+    let primerSkippedForDiagnostic = false
 
     try {
       audioDiag('drone', 'handlePlay ENTER', { audioAlreadyLive, requireColdRebuild })
@@ -437,11 +443,30 @@ function App() {
         await droneEngine.coldRebuildAudioContext('next-play-after-lock')
       }
 
+      const canSkipPostLockPrimer = postLockPlay
+        && SKIP_MEDIA_PRIMER_ON_POST_LOCK_START
+        && isNativePlaybackActive()
+        && droneEngine.getContextState?.() === 'running'
+
       if (audioAlreadyLive) {
         audioDiag('drone', 'drone start over live audio — skipping prime + native reconfigure', {
           ...droneEngine.getMetronomeDiagnostics?.(),
         })
+      } else if (canSkipPostLockPrimer) {
+        primerSkippedForDiagnostic = true
+        audioDiag('drone', 'post-lock media-primer skipped for diagnostic', {
+          nativePlaybackActive: isNativePlaybackActive(),
+          contextState: droneEngine.getContextState?.(),
+          requireColdRebuild,
+        })
       } else {
+        if (postLockPlay && SKIP_MEDIA_PRIMER_ON_POST_LOCK_START) {
+          audioDiag('drone', 'post-lock media-primer used — native/category/context not safe to skip', {
+            nativePlaybackActive: isNativePlaybackActive(),
+            contextState: droneEngine.getContextState?.(),
+            requireColdRebuild,
+          })
+        }
         await primeForPlayback('drone-play')
       }
 
@@ -487,6 +512,11 @@ function App() {
           contextState: droneEngine.getContextState?.(),
         })
       }
+      if (primerSkippedForDiagnostic) {
+        audioDiag('drone', 'post-lock media-primer skip result — startup succeeded', {
+          contextState: droneEngine.getContextState?.(),
+        })
+      }
       // UI playing is committed immediately here — same path for normal and post-lock success.
       setIsPlaying(true)
       setIsDroneStarting(false)
@@ -497,6 +527,12 @@ function App() {
       guardEnded = true
     } catch (error) {
       audioDiag('drone', 'handlePlay failed', { message: error?.message ?? String(error) })
+      if (primerSkippedForDiagnostic) {
+        audioDiag('drone', 'post-lock media-primer skip result — startup failed', {
+          message: error?.message ?? String(error),
+          contextState: droneEngine.getContextState?.(),
+        })
+      }
       setAudioHealth(AudioHealth.FAILED, 'drone-play-failed')
       if (postLockPlay) {
         // Post-lock/cold-rebuild Play failed — hard-abort so no partial drone graph survives
