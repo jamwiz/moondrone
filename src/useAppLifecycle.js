@@ -228,6 +228,48 @@ function stopPlaybackForLifecycle(setIsPlaying, setIsMetronomePlaying, source) {
   })
 }
 
+// Native willResignActive early warning (via window.moondroneNativeWillResignActive from Swift).
+// Runs the SAME click-safe lifecycle stop path as appStateChange-inactive — no separate mute system.
+// Idempotent: gracefulStopForLifecycle skips if stop is already in progress or already stopped.
+function handleNativeWillResignActiveEarly(setIsPlaying, setIsMetronomePlaying) {
+  if (!isIosNativePlatform()) {
+    return
+  }
+
+  if (shouldAllowIosBackgroundPlayback()) {
+    return
+  }
+
+  if (!droneEngine.isPlaying && !droneEngine.metronomePlaying) {
+    audioDiag('lifecycle', 'native willResignActive pre-mute ignored — already stopped', lifecycleSnapshot())
+    return
+  }
+
+  if (isMediaPrimerStartupActive()) {
+    audioDiag('lifecycle', 'native willResignActive pre-mute ignored — startup guard active', lifecycleSnapshot())
+    return
+  }
+
+  if (droneEngine.lifecycleStopInProgress === true) {
+    audioDiag('lifecycle', 'native willResignActive pre-mute ignored — stop already in progress', lifecycleSnapshot())
+    return
+  }
+
+  audioDiag('lifecycle', 'native willResignActive pre-mute requested', lifecycleSnapshot())
+
+  const contextState = droneEngine.getContextState?.() ?? 'unknown'
+  if (contextState !== 'running') {
+    audioDiag('lifecycle', 'native willResignActive pre-mute too late — context already interrupted', {
+      ...lifecycleSnapshot(),
+      contextState,
+    })
+    return
+  }
+
+  audioDiag('lifecycle', 'native willResignActive pre-mute running click-safe stop', lifecycleSnapshot())
+  stopPlaybackForLifecycle(setIsPlaying, setIsMetronomePlaying, 'native-willResignActive')
+}
+
 export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying = false, uiIsMetronomePlaying = false) {
   // App open: silently warm the native Playback session ONCE on true mount (no audio, no Tone.start,
   // no primer). Kept in its own empty-deps effect so it cannot re-fire on every play/stop — the
@@ -236,6 +278,18 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
   useEffect(() => {
     prewarmNativePlaybackSession('app-open')
   }, [])
+
+  // Expose the native willResignActive callback on window so Swift can invoke it via
+  // evaluateJavaScript before Capacitor appStateChange-inactive / visibilitychange-hidden.
+  useEffect(() => {
+    window.moondroneNativeWillResignActive = () => {
+      handleNativeWillResignActiveEarly(setIsPlaying, setIsMetronomePlaying)
+    }
+
+    return () => {
+      delete window.moondroneNativeWillResignActive
+    }
+  }, [setIsPlaying, setIsMetronomePlaying])
 
   useEffect(() => {
     const onVisibilityChange = () => {
@@ -319,9 +373,6 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
           }
 
           audioDiag('lifecycle', 'app resume / active', lifecycleSnapshot())
-          // If a willResignActive pre-mute ducked audio but no real background stop followed
-          // (transient resign — Control Center, banner), ramp it back up. No-op after a real stop.
-          droneEngine.restoreFromBackgroundPreMute?.('appStateChange-active')
           handleResumeHealthCheck('appStateChange-active')
         }).then((handle) => {
           if (cancelled) {

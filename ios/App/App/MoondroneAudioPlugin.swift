@@ -163,31 +163,27 @@ public class MoondroneAudioPlugin: CAPPlugin, CAPBridgedPlugin {
                            name: AVAudioSession.mediaServicesWereResetNotification,
                            object: nil)
         // Earliest lifecycle signal that the app is about to lose foreground focus (lock button,
-        // Control Center, incoming call banner, app switcher, backgrounding). Fires before Capacitor's
-        // appStateChange-inactive / WKWebView visibilitychange, giving JS a best-effort chance to
-        // click-safe mute WebAudio WHILE the context may still be running. This is NOT a stop — the
-        // web layer decides whether to fully stop (real background) or restore (transient resign).
+        // Control Center, app switcher, backgrounding). Fires before Capacitor appStateChange-inactive
+        // / visibilitychange-hidden, giving JS a best-effort chance to run the existing click-safe
+        // lifecycle stop WHILE the WebAudio context may still be running.
         center.addObserver(self,
                            selector: #selector(handleWillResignActive),
                            name: UIApplication.willResignActiveNotification,
                            object: nil)
-        // Counterpart to willResignActive: lets JS reverse a pre-mute duck when the app returns to
-        // active WITHOUT a real background stop (transient resign). Fires on every activation; the web
-        // layer no-ops it after a real background stop (nothing left to restore).
-        center.addObserver(self,
-                           selector: #selector(handleDidBecomeActive),
-                           name: UIApplication.didBecomeActiveNotification,
-                           object: nil)
     }
 
     @objc private func handleWillResignActive() {
-        print("⚡️ [MoondroneAudio] willResignActive — requesting JS pre-mute")
-        notifyListeners("audioWillResignActive", data: ["reason": "willResignActive"])
-    }
-
-    @objc private func handleDidBecomeActive() {
-        print("⚡️ [MoondroneAudio] didBecomeActive — requesting JS pre-mute restore")
-        notifyListeners("audioDidBecomeActive", data: ["reason": "didBecomeActive"])
+        print("⚡️ [MoondroneAudio] willResignActive — calling window.moondroneNativeWillResignActive")
+        DispatchQueue.main.async { [weak self] in
+            self?.bridge?.webView?.evaluateJavaScript(
+                "window.moondroneNativeWillResignActive?.()",
+                completionHandler: { _, error in
+                    if let error = error {
+                        print("⚡️ [MoondroneAudio] willResignActive JS callback error:", error)
+                    }
+                }
+            )
+        }
     }
 
     @objc private func handleInterruption(_ notification: Notification) {
