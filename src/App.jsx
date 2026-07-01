@@ -445,7 +445,6 @@ function App() {
       if (postLockPlay) {
         const stable = await droneEngine.confirmStableStartWindow(playStartedAt)
         if (!stable) {
-          droneEngine.requireColdAudioRebuildOnNextPlay = true
           audioDiag('drone', 'foreground startup failed — context interrupted after lock', {
             contextState: droneEngine.getContextState?.(),
           })
@@ -467,12 +466,15 @@ function App() {
     } catch (error) {
       audioDiag('drone', 'handlePlay failed', { message: error?.message ?? String(error) })
       setAudioHealth(AudioHealth.FAILED, 'drone-play-failed')
-      // Start did not confirm — keep next Play forced onto the safe path. Only escalate to a full
-      // cold rebuild when THIS Play was already a post-lock/emergency play; a normal first-start
-      // media-primer interruption must not poison the next Play into a cold rebuild.
-      droneEngine.forceSafeForegroundPlayPending = true
-      if (postLockPlay && droneEngine.getContextState?.() !== 'running') {
-        droneEngine.requireColdAudioRebuildOnNextPlay = true
+      if (postLockPlay) {
+        // Post-lock/cold-rebuild Play failed — hard-abort so no partial drone graph survives
+        // (silences + disposes, keeps next Play on the safe cold path). This prevents "sound-on
+        // while UI says Ready" on repeated lock/background cycles.
+        droneEngine.abortFailedForegroundStartup('handlePlay-failed')
+      } else {
+        // Normal Play failure: keep next Play forced onto the safe path, but do NOT escalate to a
+        // full cold rebuild (a normal first-start media-primer interruption must not poison it).
+        droneEngine.forceSafeForegroundPlayPending = true
       }
       setIsPlaying(false)
       setIsDroneStarting(false)
@@ -609,7 +611,6 @@ function App() {
       if (postLockPlay) {
         const stable = await droneEngine.confirmStableStartWindow(playStartedAt)
         if (!stable) {
-          droneEngine.requireColdAudioRebuildOnNextPlay = true
           audioDiag('drone', 'foreground startup failed — context interrupted after lock', {
             contextState: droneEngine.getContextState?.(),
           })
@@ -629,9 +630,10 @@ function App() {
     } catch (error) {
       audioDiag('drone', 'handleKeyChange start failed', { message: error?.message ?? String(error) })
       setAudioHealth(AudioHealth.FAILED, 'drone-key-change-failed')
-      droneEngine.forceSafeForegroundPlayPending = true
-      if (postLockPlay && droneEngine.getContextState?.() !== 'running') {
-        droneEngine.requireColdAudioRebuildOnNextPlay = true
+      if (postLockPlay) {
+        droneEngine.abortFailedForegroundStartup('handleKeyChange-failed')
+      } else {
+        droneEngine.forceSafeForegroundPlayPending = true
       }
       setIsPlaying(false)
       if (!audioAlreadyLive) {
@@ -887,11 +889,11 @@ function App() {
         audioDiag('metronome', 'metronome startup failed — allowing clean drone start', {
           health: getAudioHealth(),
         })
-        // Keep the next Play on the cold-rebuild path ONLY when this was already a post-lock/emergency
-        // play. A normal metronome-first startup interruption must not poison the next Play.
-        if (postLockPlay && droneEngine.getContextState?.() !== 'running') {
-          droneEngine.requireColdAudioRebuildOnNextPlay = true
-          droneEngine.forceSafeForegroundPlayPending = true
+        // Hard-abort ONLY when this was a post-lock/emergency play AND the drone is not live (a
+        // normal metronome-first startup interruption must not poison the next Play; and a live
+        // drone must never be torn down by a metronome failure).
+        if (postLockPlay) {
+          droneEngine.abortFailedForegroundStartup('handleMetronomePlay-failed')
         }
       }
       if (!droneAlreadyRunning) {

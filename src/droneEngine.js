@@ -382,6 +382,10 @@ export class DroneEngine {
     // Wall-clock timestamp of the most recent iOS interruption (any active reason). Used by the
     // post-start stable-confirmation window to detect an interruption that landed during this Play.
     this.lastInterruptionAt = 0
+    // Set by abortFailedForegroundStartup() when a post-lock/cold-rebuild Play fails to confirm a
+    // clean running window. While true, a late/stale context recovery must NOT mark audio health
+    // stable (that is what left "sound-on while UI says ready"). Cleared when a fresh start commits.
+    this.foregroundStartupFailed = false
     // Set at the moment start() commits to playing; the confirmation window measures interruptions
     // relative to this.
     this.currentPlayStartedAt = 0
@@ -540,6 +544,9 @@ export class DroneEngine {
     this.isStarting = true
     // Marker for the post-start stable-confirmation window (detects interruptions during this Play).
     this.currentPlayStartedAt = Date.now()
+    // Fresh start attempt — clear any prior failed-startup latch so a genuine recovery can mark
+    // stable again.
+    this.foregroundStartupFailed = false
     // A clean Play clears the explicit-stop gate so lightweight paths qualify again once stable.
     this.droneExplicitlyStopped = false
 
@@ -4712,6 +4719,18 @@ export class DroneEngine {
     // Playback session is clean (no "Session activation failed"). A recovery that ran while
     // backgrounded/locked can resolve with a partial native failure — never call that stable.
     scheduleAudioStable(delayMs, () => {
+      // A late/stale recovery must not mark stable after a failed foreground startup, or when there
+      // is no live play intent — that is what previously left audio running while the UI said Ready.
+      if (this.foregroundStartupFailed === true || (this.isPlaying !== true && this.metronomePlaying !== true)) {
+        audioDiag('audio-health', 'stale startup recovery ignored after failed foreground start', {
+          reason,
+          foregroundStartupFailed: this.foregroundStartupFailed === true,
+          isPlaying: this.isPlaying === true,
+          metronomePlaying: this.metronomePlaying === true,
+          contextState: this.getContextState(),
+        })
+        return false
+      }
       if (this.getContextState() !== 'running') {
         return false
       }
@@ -12645,43 +12664,101 @@ export class DroneEngine {
     })
   }
 
-  // Post-start success gate. A clean start (no interruption during this Play, no pending recovery)
-  // confirms immediately. If an interruption landed during the Play — or a recovery is pending — we
-  // require a short window where the context STAYS running, nothing re-interrupts, the drone is
-  // still the current playing generation, and the final output is not muted. Returns true only when
-  // the running state is genuinely confirmed.
-  async confirmStableStartWindow(playStartedAt, windowMs = 400) {
-    if (this.getContextState() !== 'running' || !this.isPlaying) {
-      return false
-    }
-
-    const hadInterruptionDuringPlay = (this.lastInterruptionAt ?? 0) >= (playStartedAt ?? 0)
-    const recoveryPending = Boolean(this.contextInterruptDebounceTimer)
-    const finalMuted = this.masterFinalOutputTrim?.mute === true
-
-    // Clean start — nothing suspicious happened during this Play. Confirm without added latency.
-    if (!hadInterruptionDuringPlay && !recoveryPending && !finalMuted) {
+  // Post-start success gate (post-lock/cold-rebuild Plays only). Rather than failing just because an
+  // interruption occurred earlier in startup, we POLL for a quiet running window: success as soon as
+  // the context is running, the play intent is still current, the final output is not muted, no
+  // recovery is pending, and no interruption has landed in the last `quietMs`. Only if that window
+  // cannot be achieved before `timeoutMs` do we report failure. A truly clean start (no interruption
+  // during this Play) confirms on the first poll with no added latency.
+  async confirmStableStartWindow(playStartedAt, { timeoutMs = 2500, quietMs = 500 } = {}) {
+    const isQuietRunning = () => {
+      if (this.getContextState() !== 'running') {
+        return false
+      }
+      if (this.isPlaying !== true) {
+        return false
+      }
+      if (this.masterFinalOutputTrim?.mute === true) {
+        return false
+      }
+      if (Boolean(this.contextInterruptDebounceTimer)) {
+        return false
+      }
+      // Quiet = no interruption within the trailing window. An interruption before this Play does
+      // not count against us once enough clean running time has elapsed.
+      const lastInt = this.lastInterruptionAt ?? 0
+      if (lastInt >= (playStartedAt ?? 0) && Date.now() - lastInt < quietMs) {
+        return false
+      }
       return true
     }
 
-    const windowStart = Date.now()
-    await new Promise((resolve) => window.setTimeout(resolve, windowMs))
-
-    if (this.getContextState() !== 'running' || !this.isPlaying) {
-      return false
-    }
-    if (Boolean(this.contextInterruptDebounceTimer)) {
-      return false
-    }
-    if (this.masterFinalOutputTrim?.mute === true) {
-      return false
-    }
-    // A NEW interruption during the confirmation window means still unstable.
-    if ((this.lastInterruptionAt ?? 0) >= windowStart) {
-      return false
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      if (isQuietRunning()) {
+        return true
+      }
+      // Play intent was cleared (stop/abort/interruption teardown) — stop waiting.
+      if (this.isPlaying !== true) {
+        return false
+      }
+      await new Promise((resolve) => window.setTimeout(resolve, 120))
     }
 
-    return true
+    return isQuietRunning()
+  }
+
+  // Hard abort for a failed foreground startup after lock/background (or any postLock/cold-rebuild
+  // Play that cannot confirm a clean running window). A plain throw used to leave a partially-built,
+  // still-audible drone graph behind (sound-on while the UI said Ready). This silences and disposes
+  // everything, invalidates stale callbacks, and keeps the next Play on the safe cold path.
+  abortFailedForegroundStartup(reason = 'post-lock-start-failed') {
+    audioDiag('lifecycle', 'failed foreground startup aborted — audio graph silenced', {
+      reason,
+      wasPlaying: this.isPlaying === true,
+      isStarting: this.isStarting === true,
+      contextState: this.getContextState(),
+    })
+
+    // 1. Mark intent stopped + latch the failure so any late recovery is ignored.
+    this.isPlaying = false
+    this.metronomePlaying = false
+    this.isStarting = false
+    this.foregroundStartupFailed = true
+    this.droneExplicitlyStopped = true
+    this.lastDroneStopAt = Date.now()
+
+    // 2. Keep the next Play on the safe cold path.
+    this.forceSafeForegroundPlayPending = true
+    this.lifecycleStopPendingPlay = true
+    this.requireColdAudioRebuildOnNextPlay = true
+
+    // 3. Bump generations so no in-flight startup/recovery callback can restore output.
+    this.bumpDroneOpGeneration('failed-foreground-start-abort')
+    this.metronomeStartupGeneration += 1
+
+    // 4. Cancel startup/recovery/context-interrupt timers.
+    if (this.contextInterruptDebounceTimer) {
+      window.clearTimeout(this.contextInterruptDebounceTimer)
+      this.contextInterruptDebounceTimer = null
+    }
+    this.contextInterruptRecoveryInFlight = false
+    this.metronomeContextRecoveryDeadline = 0
+    this.metronomeStartupRecoveryPending = false
+    this.clearMetronomePrimerWatchdog()
+
+    // 5. Hard output mute + primer pause + metronome click release (kill-switch), then stop the
+    //    metronome scheduler.
+    this.applyBackgroundKillSwitchMute(`failed-start:${reason}`)
+    this.stopMetronomeScheduler()
+    this.cancelPendingMetronomeClicks()
+
+    // 6. Tear down / dispose the partially-created drone graph so nothing survives.
+    try {
+      this.hardResetAudioGraph(`failed-foreground-start:${reason}`)
+    } catch {
+      // Best-effort teardown; the kill-switch mute above already silenced output.
+    }
   }
 
   // Synchronous hard safety mute — the FIRST thing any background/lock/inactive/hidden/pagehide/
