@@ -1,8 +1,4 @@
 import { useEffect, useRef, useState } from 'react'
-import {
-  METRONOME_METER_OPTIONS,
-  METRONOME_SOUND_MODES,
-} from './metronomeSamples'
 import { audioDiag } from './audioDiagnostics'
 import { droneEngine } from './droneEngine'
 import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
@@ -10,10 +6,6 @@ import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
 export function MetronomeMenu({
   bpm,
   onBpmChange,
-  soundMode,
-  onSoundChange,
-  meter,
-  onMeterChange,
   isPlaying,
   metronomeStartPendingRef,
   onPlay,
@@ -190,40 +182,6 @@ export function MetronomeMenu({
               aria-label="Metronome BPM"
               onChange={onBpmChange}
             />
-          </div>
-
-          <div className="metronome-field-row">
-            <label className="metronome-field">
-              <span className="metronome-field-header">Meter</span>
-              <select
-                className="field-select field-select-compact"
-                value={String(meter)}
-                onChange={onMeterChange}
-                aria-label="Metronome meter"
-              >
-                {METRONOME_METER_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="metronome-field">
-              <span className="metronome-field-header">Sound</span>
-              <select
-                className="field-select field-select-compact"
-                value={soundMode}
-                onChange={onSoundChange}
-                aria-label="Metronome sound"
-              >
-                {METRONOME_SOUND_MODES.map((mode) => (
-                  <option key={mode.id} value={mode.id}>
-                    {mode.label}
-                  </option>
-                ))}
-              </select>
-            </label>
           </div>
 
           <button

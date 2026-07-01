@@ -7,7 +7,6 @@ import {
 import {
   DEFAULT_METRONOME_METER,
   DEFAULT_METRONOME_SOUND_MODE,
-  METRONOME_STRAIGHT_METER,
 } from './metronomeSamples'
 import { BINAURAL_MODES, DEFAULT_BINAURAL_MODE_ID, DEFAULT_PRESET, PRESETS } from './presets'
 import { DEFAULT_MOOD_ID, MOODS } from './moods'
@@ -40,7 +39,6 @@ import {
   beginMetronomeOperation,
   isMetronomeOperationCurrent,
 } from './metronomeOperationControl'
-import { AudioDebugPanel } from './AudioDebugPanel'
 import './App.css'
 
 const DevOutputMeter = import.meta.env.DEV
@@ -152,8 +150,6 @@ function App() {
   const [isPlaying, setIsPlaying] = useState(false)
   const [isDroneStarting, setIsDroneStarting] = useState(false)
   const [metronomeBpm, setMetronomeBpm] = useState(DEFAULT_METRONOME_BPM)
-  const [metronomeSoundMode, setMetronomeSoundMode] = useState(DEFAULT_METRONOME_SOUND_MODE)
-  const [metronomeMeter, setMetronomeMeter] = useState(DEFAULT_METRONOME_METER)
   const [isMetronomePlaying, setIsMetronomePlaying] = useState(false)
   const [metronomePulse, setMetronomePulse] = useState({ tick: 0, downbeat: false })
   const [infoScreen, setInfoScreen] = useState(null)
@@ -876,8 +872,8 @@ function App() {
         }
       }
 
-      droneEngine.setMetronomeSoundMode(metronomeSoundMode)
-      droneEngine.setMetronomeMeter(metronomeMeter)
+      droneEngine.setMetronomeSoundMode(DEFAULT_METRONOME_SOUND_MODE)
+      droneEngine.setMetronomeMeter(DEFAULT_METRONOME_METER)
       // Fast audible start ONLY when the shared session is genuinely stable (drone already running).
       // Cold / uncertain / interrupted / recovering / failed → engine prepares silently and starts
       // the audible scheduler only after its settle/recovery window confirms stability.
@@ -944,7 +940,7 @@ function App() {
 
       audioDiag('metronome', 'handleMetronomePlay FAILED — metronome start failed', {
         message: error?.message ?? String(error),
-        uiIsMetronomePlaying,
+        uiIsMetronomePlaying: isMetronomePlaying,
         operationToken,
         shouldCleanup,
         droneAlreadyRunning,
@@ -1011,20 +1007,6 @@ function App() {
     droneEngine.setMetronomeBpm(nextBpm)
   }
 
-  function handleMetronomeSoundChange(event) {
-    const nextSoundMode = event.target.value
-    setMetronomeSoundMode(nextSoundMode)
-    droneEngine.setMetronomeSoundMode(nextSoundMode)
-  }
-
-  function handleMetronomeMeterChange(event) {
-    const nextMeter = event.target.value === METRONOME_STRAIGHT_METER
-      ? METRONOME_STRAIGHT_METER
-      : Number(event.target.value)
-    setMetronomeMeter(nextMeter)
-    droneEngine.setMetronomeMeter(nextMeter)
-  }
-
   const activeAtmosphere = getAtmosphere(atmosphereId)
 
   return (
@@ -1067,10 +1049,6 @@ function App() {
             <MetronomeMenu
               bpm={metronomeBpm}
               onBpmChange={handleMetronomeBpmChange}
-              soundMode={metronomeSoundMode}
-              onSoundChange={handleMetronomeSoundChange}
-              meter={metronomeMeter}
-              onMeterChange={handleMetronomeMeterChange}
               isPlaying={isMetronomePlaying}
               metronomeStartPendingRef={metronomeStartPendingRef}
               onPlay={handleMetronomePlay}
@@ -1374,8 +1352,6 @@ function App() {
           <DevOutputMeter />
         </Suspense>
       ) : null}
-
-      <AudioDebugPanel uiIsMetronomePlaying={isMetronomePlaying} />
     </main>
   )
 }
