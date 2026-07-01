@@ -386,6 +386,9 @@ export class DroneEngine {
     // clean running window. While true, a late/stale context recovery must NOT mark audio health
     // stable (that is what left "sound-on while UI says ready"). Cleared when a fresh start commits.
     this.foregroundStartupFailed = false
+    // Post-lock/cold-startup micro-fade phase for interruption timing diagnostics: 'none' | 'begin' | 'complete'
+    this.startupMicroFadeState = 'none'
+    this.startupMicroFadeReason = null
     // Reversible early "duck" applied on the native willResignActive pre-warning (before Capacitor's
     // appStateChange-inactive). If the app truly backgrounds, the full lifecycle stop supersedes it;
     // if the app returns active (transient resign — Control Center, banner), it is ramped back up.
@@ -526,7 +529,7 @@ export class DroneEngine {
     intensity = this.intensity,
     breath = this.breath,
     reverbWetPercent = this.currentReverbWet * 100,
-    { skipNativeReconfigure = false } = {},
+    { skipNativeReconfigure = false, applyStartupMicroFade = false, startupMicroFadeReason = 'startup', postLockStartupMicroFade = false } = {},
   ) {
     if (this.isPlaying) {
       if (key != null) {
@@ -548,6 +551,8 @@ export class DroneEngine {
     this.isStarting = true
     // Marker for the post-start stable-confirmation window (detects interruptions during this Play).
     this.currentPlayStartedAt = Date.now()
+    this.startupMicroFadeState = 'none'
+    this.startupMicroFadeReason = null
     // Fresh start attempt — clear any prior failed-startup latch so a genuine recovery can mark
     // stable again.
     this.foregroundStartupFailed = false
@@ -630,9 +635,17 @@ export class DroneEngine {
       this.breath = breath
       this.currentReverbWet = reverbWetPercent / 100
       this.ensureSignalChain()
-      // Clear any lifecycle/emergency mute or low level left on the final output by an unsafe stop,
-      // so this fresh start is actually audible.
-      if (this.masterFinalOutputTrim) {
+      // Final-output anti-click: on full startup (incl. post-lock cold rebuild), ramp the master trim
+      // from near-silence to target over ~65ms so the graph edge does not click. Does NOT wait for
+      // confirmStableStartWindow — scheduling only, zero Play delay.
+      if (applyStartupMicroFade) {
+        this.applyStartupMicroFade({ reason: startupMicroFadeReason, postLock: postLockStartupMicroFade })
+      } else if (this.masterFinalOutputTrim) {
+        audioDiag('drone-engine', 'post-lock startup micro-fade skipped — normal start', {
+          reason: startupMicroFadeReason,
+          skipNativeReconfigure,
+          contextState: this.getContextState(),
+        })
         try {
           this.masterFinalOutputTrim.mute = false
           this.masterFinalOutputTrim.volume.cancelScheduledValues(Tone.now())
@@ -9103,6 +9116,9 @@ export class DroneEngine {
       startupGuardActive: isMediaPrimerStartupActive(),
       metronomePlaying: this.metronomePlaying === true,
     })
+    if (this.startupMicroFadeState !== 'none') {
+      this.logStartupMicroFadeInterruptionTiming(reason)
+    }
 
     if (this.contextInterruptDebounceTimer) {
       window.clearTimeout(this.contextInterruptDebounceTimer)
@@ -9228,6 +9244,9 @@ export class DroneEngine {
     // Record every interruption so the post-start stable window can tell if one landed during a Play.
     if (reason === 'interruption-began' || reason === 'context-interrupted' || reason === 'native') {
       this.lastInterruptionAt = Date.now()
+      if (this.isStarting || this.startupMicroFadeState !== 'none') {
+        this.logStartupMicroFadeInterruptionTiming(reason)
+      }
     }
 
     if (this.isDeferredStartupInterruption(reason)) {
@@ -12772,6 +12791,105 @@ export class DroneEngine {
     } catch {
       // Best-effort teardown; the kill-switch mute above already silenced output.
     }
+  }
+
+  // Tiny anti-click ramp on the final master trim for full startup (post-lock/cold rebuild and normal
+  // cold Play). Schedules -60 → target over ~65ms on masterFinalOutputTrim (whole drone bus). Does
+  // NOT block Play or wait for confirmStableStartWindow.
+  applyStartupMicroFade({ reason = 'startup', postLock = false } = {}) {
+    const RAMP_SECONDS = 0.065
+    const SILENT_DB = -60
+
+    if (!this.masterFinalOutputTrim) {
+      audioDiag('drone-engine', 'post-lock startup micro-fade skipped — no final output gain found', {
+        reason,
+        postLock,
+        contextState: this.getContextState(),
+        generation: this.droneOpGeneration,
+      })
+      return false
+    }
+
+    const targetDb = this.getToneLabFinalOutputTrimDb()
+    let now = 0
+    try {
+      now = Tone.now()
+    } catch {
+      now = 0
+    }
+
+    try {
+      this.masterFinalOutputTrim.mute = false
+      this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
+      this.masterFinalOutputTrim.volume.setValueAtTime(SILENT_DB, now)
+      this.masterFinalOutputTrim.volume.linearRampToValueAtTime(targetDb, now + RAMP_SECONDS)
+    } catch {
+      audioDiag('drone-engine', 'post-lock startup micro-fade skipped — no final output gain found', {
+        reason,
+        postLock,
+        contextState: this.getContextState(),
+        generation: this.droneOpGeneration,
+      })
+      return false
+    }
+
+    this.startupMicroFadeState = 'begin'
+    this.startupMicroFadeReason = reason
+
+    audioDiag('drone-engine', 'post-lock startup micro-fade begin', {
+      reason,
+      postLock,
+      contextState: this.getContextState(),
+      generation: this.droneOpGeneration,
+      targetGainDb: targetDb,
+      rampSeconds: RAMP_SECONDS,
+    })
+    audioDiag('drone-engine', 'drone audible output opening', {
+      reason,
+      rampSeconds: RAMP_SECONDS,
+      targetGainDb: targetDb,
+      generation: this.droneOpGeneration,
+    })
+
+    window.setTimeout(() => {
+      if (this.startupMicroFadeState !== 'begin') {
+        return
+      }
+      this.startupMicroFadeState = 'complete'
+      audioDiag('drone-engine', 'post-lock startup micro-fade complete', {
+        reason,
+        postLock,
+        contextState: this.getContextState(),
+        generation: this.droneOpGeneration,
+        targetGainDb: targetDb,
+      })
+      audioDiag('drone-engine', 'drone audible output opened', {
+        reason,
+        generation: this.droneOpGeneration,
+      })
+    }, Math.round(RAMP_SECONDS * 1000) + 15)
+
+    return true
+  }
+
+  logStartupMicroFadeInterruptionTiming(interruptReason) {
+    if (this.startupMicroFadeState === 'none') {
+      return
+    }
+
+    const message = this.startupMicroFadeState === 'complete'
+      ? 'startup interruption occurred after micro-fade'
+      : 'startup interruption occurred during micro-fade'
+
+    audioDiag('drone-engine', message, {
+      interruptReason,
+      microFadeState: this.startupMicroFadeState,
+      microFadeReason: this.startupMicroFadeReason,
+      contextState: this.getContextState(),
+      isStarting: this.isStarting === true,
+      isPlaying: this.isPlaying === true,
+      generation: this.droneOpGeneration,
+    })
   }
 
   // Synchronous hard safety mute — the FIRST thing any background/lock/inactive/hidden/pagehide/

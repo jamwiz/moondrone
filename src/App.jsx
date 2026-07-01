@@ -453,7 +453,12 @@ function App() {
         intensity,
         breath,
         FIXED_REVERB_PERCENT,
-        { skipNativeReconfigure: audioAlreadyLive },
+        {
+          skipNativeReconfigure: audioAlreadyLive,
+          applyStartupMicroFade: !audioAlreadyLive,
+          startupMicroFadeReason: requireColdRebuild ? 'next-play-after-lock' : 'foreground-start',
+          postLockStartupMicroFade: postLockPlay,
+        },
       )
 
       const contextOk = await ensureContextRunningAfterStart('drone-play')
@@ -627,7 +632,12 @@ function App() {
         intensity,
         breath,
         FIXED_REVERB_PERCENT,
-        { skipNativeReconfigure: audioAlreadyLive },
+        {
+          skipNativeReconfigure: audioAlreadyLive,
+          applyStartupMicroFade: !audioAlreadyLive,
+          startupMicroFadeReason: requireColdRebuild ? 'next-play-after-lock' : 'foreground-start',
+          postLockStartupMicroFade: postLockPlay,
+        },
       )
 
       const contextOk = await ensureContextRunningAfterStart('drone-key-change-start')
