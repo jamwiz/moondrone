@@ -386,9 +386,6 @@ export class DroneEngine {
     // clean running window. While true, a late/stale context recovery must NOT mark audio health
     // stable (that is what left "sound-on while UI says ready"). Cleared when a fresh start commits.
     this.foregroundStartupFailed = false
-    // True while a post-lock/background start is holding the final output silent until the stable
-    // window confirms. openForegroundStartupOutputGate() ramps up and clears this.
-    this.foregroundStartupOutputGated = false
     // Set at the moment start() commits to playing; the confirmation window measures interruptions
     // relative to this.
     this.currentPlayStartedAt = 0
@@ -525,7 +522,7 @@ export class DroneEngine {
     intensity = this.intensity,
     breath = this.breath,
     reverbWetPercent = this.currentReverbWet * 100,
-    { skipNativeReconfigure = false, deferOutputGate = false } = {},
+    { skipNativeReconfigure = false } = {},
   ) {
     if (this.isPlaying) {
       if (key != null) {
@@ -629,22 +626,13 @@ export class DroneEngine {
       this.breath = breath
       this.currentReverbWet = reverbWetPercent / 100
       this.ensureSignalChain()
-      // Clear any lifecycle/emergency mute or low level left on the final output by an unsafe stop.
-      // For a post-lock/background start we keep the final output silent (but un-muted so a ramp can
-      // render) and only open it via openForegroundStartupOutputGate() AFTER the stable window
-      // confirms — this avoids a fade-in over a still-interrupting/recovering context. A normal start
-      // opens the output immediately (unchanged behavior).
+      // Clear any lifecycle/emergency mute or low level left on the final output by an unsafe stop,
+      // so this fresh start is actually audible.
       if (this.masterFinalOutputTrim) {
         try {
           this.masterFinalOutputTrim.mute = false
           this.masterFinalOutputTrim.volume.cancelScheduledValues(Tone.now())
-          if (deferOutputGate) {
-            this.foregroundStartupOutputGated = true
-            this.masterFinalOutputTrim.volume.value = -60
-          } else {
-            this.foregroundStartupOutputGated = false
-            this.masterFinalOutputTrim.volume.value = this.getToneLabFinalOutputTrimDb()
-          }
+          this.masterFinalOutputTrim.volume.value = this.getToneLabFinalOutputTrimDb()
         } catch {
           // Node may be mid-build; ignore.
         }
@@ -9256,6 +9244,15 @@ export class DroneEngine {
     if (!ENABLE_IOS_BACKGROUND_AUDIO
       && (this.metronomePlaying || this.isPlaying)
       && (reason === 'interruption-began' || reason === 'context-interrupted' || reason === 'native')) {
+      // Earliest possible kill-switch: interruption-began can arrive while the context is still
+      // running (before it flips to "interrupted"), so muting here still gets a click-safe ramp and
+      // catches the pop that a later context-interrupted-only mute would miss. Startup guard is not
+      // active at this point (isDeferredStartupInterruption returned above when it was).
+      audioDiag('lifecycle', 'preemptive interruption mute before background stop', {
+        reason,
+        contextState: this.getContextState(),
+      })
+      this.applyBackgroundKillSwitchMute(`preemptive:${reason}`)
       this.emergencyStopForActiveInterruption(reason)
       return
     }
@@ -12720,33 +12717,6 @@ export class DroneEngine {
     return isQuietRunning()
   }
 
-  // Open the deferred post-lock/background output gate: ramp the final output from silence up to the
-  // normal trim over a short click-safe window, then clear the gate. Called by App ONLY after
-  // confirmStableStartWindow succeeds, so the fade-in happens over a confirmed-quiet running context.
-  openForegroundStartupOutputGate(rampSeconds = 0.12) {
-    if (this.foregroundStartupOutputGated !== true) {
-      return
-    }
-    this.foregroundStartupOutputGated = false
-
-    if (this.masterFinalOutputTrim) {
-      try {
-        const now = Tone.now()
-        const target = this.getToneLabFinalOutputTrimDb()
-        this.masterFinalOutputTrim.mute = false
-        this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
-        this.masterFinalOutputTrim.volume.setValueAtTime(-60, now)
-        this.masterFinalOutputTrim.volume.linearRampToValueAtTime(target, now + rampSeconds)
-      } catch {
-        // Node may be mid-build; ignore.
-      }
-    }
-
-    audioDiag('lifecycle', 'foreground startup output gate opened', {
-      contextState: this.getContextState(),
-    })
-  }
-
   // Hard abort for a failed foreground startup after lock/background (or any postLock/cold-rebuild
   // Play that cannot confirm a clean running window). A plain throw used to leave a partially-built,
   // still-audible drone graph behind (sound-on while the UI said Ready). This silences and disposes
@@ -12866,11 +12836,19 @@ export class DroneEngine {
     // otherwise have to be un-muted on the next start).
     this.forceSilenceActiveMetronomeClicks()
 
-    audioDiag('lifecycle', 'background click-safe output gate closed', {
-      reason,
-      contextRunning,
-      contextState: this.getContextState(),
-    })
+    if (contextRunning) {
+      audioDiag('lifecycle', 'background click-safe output gate closed', {
+        reason,
+        contextState: this.getContextState(),
+      })
+    } else {
+      // Context already interrupted/suspended — WebAudio ramps cannot render, so we hard-muted above.
+      // There is no click-safe fade possible here; the stop may be abrupt but never worse.
+      audioDiag('lifecycle', 'background emergency mute applied after context interruption — no ramp possible', {
+        reason,
+        contextState: this.getContextState(),
+      })
+    }
 
     // Pause the media primer ONLY after WebAudio output + reverb are muted above, so pausing it can
     // never expose an audible tail; it just releases the audio route promptly.
@@ -12895,7 +12873,8 @@ export class DroneEngine {
     const wasPlaying = this.isPlaying
     const wasMetronomePlaying = this.metronomePlaying
 
-    // KILL-SWITCH FIRST: silence all audible output synchronously before any async cleanup.
+    // The caller (handleNativeAudioInterruption) already applied the kill-switch mute preemptively.
+    // Re-assert it here as a safety net for any other future caller (idempotent: ramps from silence).
     this.applyBackgroundKillSwitchMute(`emergency:${reason}`)
 
     audioDiag('lifecycle', 'active iOS interruption with background audio disabled — emergency stop', {
