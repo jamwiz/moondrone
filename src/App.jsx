@@ -381,6 +381,16 @@ function App() {
     setIsDroneStarting(true)
     isStartingRef.current = true
 
+    // Invariant: never layer a new Play over live audio. If the UI says stopped but the engine still
+    // reports playing, correct to a clean stop first so this Play starts from an honest state (this
+    // makes "audio playing while UI says Ready" impossible even if a prior stop desynced).
+    if (droneEngine.isPlaying === true) {
+      audioDiag('drone', 'UI stopped but engine playing — correcting to stop', {
+        contextState: droneEngine.getContextState?.(),
+      })
+      droneEngine.stop()
+    }
+
     // After a lock/emergency interruption the old context is poisoned — the next Play must cold
     // rebuild and CANNOT reuse a lightweight / already-live / quick-restart path.
     const requireColdRebuild = droneEngine.requireColdAudioRebuildOnNextPlay === true
@@ -456,6 +466,12 @@ function App() {
       droneEngine.forceSafeForegroundPlayPending = false
       droneEngine.lifecycleStopPendingPlay = false
       droneEngine.requireColdAudioRebuildOnNextPlay = false
+      if (postLockPlay) {
+        audioDiag('drone', 'post-lock startup success — UI playing committed', {
+          contextState: droneEngine.getContextState?.(),
+        })
+      }
+      // UI playing is committed immediately here — same path for normal and post-lock success.
       setIsPlaying(true)
       setIsDroneStarting(false)
       if (!audioAlreadyLive) {
