@@ -442,7 +442,7 @@ function App() {
         intensity,
         breath,
         FIXED_REVERB_PERCENT,
-        { skipNativeReconfigure: audioAlreadyLive },
+        { skipNativeReconfigure: audioAlreadyLive, deferOutputGate: postLockPlay && !audioAlreadyLive },
       )
 
       const contextOk = await ensureContextRunningAfterStart('drone-play')
@@ -466,6 +466,9 @@ function App() {
       droneEngine.forceSafeForegroundPlayPending = false
       droneEngine.lifecycleStopPendingPlay = false
       droneEngine.requireColdAudioRebuildOnNextPlay = false
+      // Open the deferred post-lock output gate now (no-op for a normal start) so the drone fades in
+      // cleanly over the confirmed-stable context instead of being audible during startup churn.
+      droneEngine.openForegroundStartupOutputGate?.()
       if (postLockPlay) {
         audioDiag('drone', 'post-lock startup success — UI playing committed', {
           contextState: droneEngine.getContextState?.(),
@@ -616,7 +619,7 @@ function App() {
         intensity,
         breath,
         FIXED_REVERB_PERCENT,
-        { skipNativeReconfigure: audioAlreadyLive },
+        { skipNativeReconfigure: audioAlreadyLive, deferOutputGate: postLockPlay && !audioAlreadyLive },
       )
 
       const contextOk = await ensureContextRunningAfterStart('drone-key-change-start')
@@ -637,6 +640,7 @@ function App() {
       droneEngine.forceSafeForegroundPlayPending = false
       droneEngine.lifecycleStopPendingPlay = false
       droneEngine.requireColdAudioRebuildOnNextPlay = false
+      droneEngine.openForegroundStartupOutputGate?.()
       setIsPlaying(true)
       if (!audioAlreadyLive) {
         endMediaPrimerStartup('drone-key-change-start-success')
