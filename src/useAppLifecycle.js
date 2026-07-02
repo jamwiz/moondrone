@@ -210,17 +210,34 @@ function stopPlaybackForLifecycle(setIsPlaying, setIsMetronomePlaying, source) {
 
   // Graceful declick + clean teardown (NOT a hard reset). Engine reflects stopped intent
   // synchronously so the next Play takes the safe foreground startup path.
-  const { wasPlaying, wasMetronomePlaying } = droneEngine.gracefulStopForLifecycle()
+  const {
+    wasPlaying,
+    wasMetronomePlaying,
+    primerPauseOwnedByEngine = false,
+  } = droneEngine.gracefulStopForLifecycle()
 
   // Make the UI honest immediately — never leave Play active when lifecycle stopped audio.
   setIsPlaying(false)
   setIsMetronomePlaying(false)
 
-  // Pause the primer only AFTER audio has been stopped (force past the startup-guard skip).
-  try {
-    pausePrimer(`background-stop:${source}`, { force: true })
-  } catch {
-    // Primer may be absent on non-iOS; ignore.
+  // Primer pause is owned by applyBackgroundKillSwitchMute() when the engine ran the kill-switch
+  // (output/reverb muted first). Only pause here on skipped stops where the engine did not run it
+  // (e.g. already idle). Avoid duplicate iOS media-route churn on normal background/lock stops.
+  if (!primerPauseOwnedByEngine) {
+    try {
+      pausePrimer(`background-stop:${source}`, { force: true })
+    } catch {
+      // Primer may be absent on non-iOS; ignore.
+    }
+    audioDiag('lifecycle', 'background stop primer pause — engine kill-switch did not run', {
+      source,
+      primerPlaying: readLifecyclePrimerPlaying(),
+    })
+  } else {
+    audioDiag('lifecycle', 'background stop primer pause skipped — owned by engine kill-switch', {
+      source,
+      primerPlaying: readLifecyclePrimerPlaying(),
+    })
   }
 
   audioDiag('lifecycle', 'background stop complete — UI stopped', {

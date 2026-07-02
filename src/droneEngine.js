@@ -399,6 +399,12 @@ export class DroneEngine {
     // appStateChange-inactive). If the app truly backgrounds, the full lifecycle stop supersedes it;
     // if the app returns active (transient resign — Control Center, banner), it is ramped back up.
     this.backgroundPreMuteActive = false
+    // Pending hard-mute from applyBackgroundKillSwitchMute() (~18ms after a click-safe ramp). Must be
+    // cancelled on the next Play or it can re-mute output mid-startup after background/lock.
+    this.backgroundKillSwitchHardMuteTimer = null
+    // Deferred graceful lifecycle teardown (stopForLifecycle after declick). Cancelled if the user
+    // presses Play before it fires so a fresh start is not torn down mid-flight.
+    this.lifecycleGracefulStopTimer = null
     // Set at the moment start() commits to playing; the confirmation window measures interruptions
     // relative to this.
     this.currentPlayStartedAt = 0
@@ -562,6 +568,16 @@ export class DroneEngine {
     this.foregroundStartupFailed = false
     // A clean Play clears the explicit-stop gate so lightweight paths qualify again once stable.
     this.droneExplicitlyStopped = false
+
+    const postBackgroundPlay = this.lifecycleStopPendingPlay === true
+      || this.forceSafeForegroundPlayPending === true
+      || this.requireColdAudioRebuildOnNextPlay === true
+
+    if (postBackgroundPlay) {
+      this.restorePostBackgroundAudioOutputForPlay('drone-start', {
+        skipTrimVolumeRestore: applyStartupMicroFade,
+      })
+    }
 
     if (this.lifecycleStopPendingPlay) {
       this.lifecycleStopPendingPlay = false
@@ -13090,6 +13106,160 @@ export class DroneEngine {
     audioDiag('lifecycle', 'willResignActive pre-mute restored — app returned active', { reason })
   }
 
+  clearBackgroundKillSwitchHardMuteTimer() {
+    if (this.backgroundKillSwitchHardMuteTimer != null) {
+      window.clearTimeout(this.backgroundKillSwitchHardMuteTimer)
+      this.backgroundKillSwitchHardMuteTimer = null
+    }
+  }
+
+  clearLifecycleGracefulStopTimer() {
+    if (this.lifecycleGracefulStopTimer != null) {
+      window.clearTimeout(this.lifecycleGracefulStopTimer)
+      this.lifecycleGracefulStopTimer = null
+    }
+  }
+
+  getPostBackgroundOutputDiagnostics(extra = {}) {
+    let finalOutputTrimDb = null
+    let finalOutputMuted = null
+    try {
+      if (this.masterFinalOutputTrim) {
+        finalOutputMuted = this.masterFinalOutputTrim.mute === true
+        finalOutputTrimDb = Number(this.masterFinalOutputTrim.volume.value.toFixed(2))
+      }
+    } catch {
+      finalOutputMuted = 'error'
+    }
+
+    let reverbWet = null
+    try {
+      if (this.reverb?.wet) {
+        reverbWet = Number(this.reverb.wet.value.toFixed(4))
+      }
+    } catch {
+      reverbWet = 'error'
+    }
+
+    return {
+      contextState: this.getContextState(),
+      nativePlaybackActive: isNativePlaybackActive(),
+      primerPlaying: isPrimerPlaying(),
+      finalOutputMuted,
+      finalOutputTrimDb,
+      reverbWet,
+      lifecycleStopPendingPlay: this.lifecycleStopPendingPlay === true,
+      forceSafeForegroundPlayPending: this.forceSafeForegroundPlayPending === true,
+      requireColdAudioRebuildOnNextPlay: this.requireColdAudioRebuildOnNextPlay === true,
+      backgroundKillSwitchHardMutePending: this.backgroundKillSwitchHardMuteTimer != null,
+      lifecycleGracefulStopPending: this.lifecycleGracefulStopTimer != null,
+      ...extra,
+    }
+  }
+
+  isPostBackgroundOutputStillMuted({ requireAudibleTrim = false } = {}) {
+    if (!this.masterFinalOutputTrim) {
+      // Post-background success expects a live trim; missing node is treated as silent only when
+      // we are checking after startup (not on the pre-start snapshot before restore/micro-fade).
+      return requireAudibleTrim
+    }
+
+    try {
+      if (this.masterFinalOutputTrim.mute === true) {
+        return true
+      }
+
+      if (requireAudibleTrim && this.masterFinalOutputTrim.volume.value <= -59.5) {
+        return true
+      }
+    } catch {
+      return requireAudibleTrim
+    }
+
+    return false
+  }
+
+  logPostBackgroundPlayOutputCheck(phase, extra = {}) {
+    const snapshot = this.getPostBackgroundOutputDiagnostics({ phase, ...extra })
+    audioDiag('lifecycle', `post-background Play output check — ${phase}`, snapshot)
+
+    if (phase === 'after-startup-success') {
+      if (this.isPostBackgroundOutputStillMuted({ requireAudibleTrim: true })) {
+        audioDiag('lifecycle', 'post-background startup succeeded but output still muted', {
+          finalOutputMuted: snapshot.finalOutputMuted,
+          finalOutputTrimDb: snapshot.finalOutputTrimDb,
+          reverbWet: snapshot.reverbWet,
+          backgroundKillSwitchHardMutePending: snapshot.backgroundKillSwitchHardMutePending,
+          lifecycleGracefulStopPending: snapshot.lifecycleGracefulStopPending,
+          contextState: snapshot.contextState,
+          nativePlaybackActive: snapshot.nativePlaybackActive,
+          ...snapshot,
+        })
+        return false
+      }
+
+      audioDiag('lifecycle', 'post-background audio output restore check — success', snapshot)
+      return true
+    }
+
+    return !this.isPostBackgroundOutputStillMuted()
+  }
+
+  // User Play/start only: undo any kill-switch output silence left over from background/lock stop.
+  // Does not run on resume/prewarm. Cancels pending hard-mute timers so they cannot re-mute mid-start.
+  restorePostBackgroundAudioOutputForPlay(reason = 'play-start', { skipTrimVolumeRestore = false } = {}) {
+    this.clearBackgroundKillSwitchHardMuteTimer()
+    this.clearLifecycleGracefulStopTimer()
+    this.lifecycleStopInProgress = false
+
+    let restored = false
+
+    if (this.masterFinalOutputTrim) {
+      try {
+        if (this.masterFinalOutputTrim.mute === true) {
+          this.masterFinalOutputTrim.mute = false
+          restored = true
+        }
+
+        if (!skipTrimVolumeRestore) {
+          const targetDb = this.getToneLabFinalOutputTrimDb()
+          const now = this.getToneNowSafe()
+          const currentDb = this.masterFinalOutputTrim.volume.value
+          if (Math.abs(currentDb - targetDb) > 0.05 || currentDb <= -59.5) {
+            this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
+            this.masterFinalOutputTrim.volume.value = targetDb
+            restored = true
+          }
+        }
+      } catch {
+        // Node may be mid-teardown; ignore.
+      }
+    }
+
+    if (this.reverb?.wet && !skipTrimVolumeRestore) {
+      try {
+        const targetWet = this.getReverbWet()
+        if (targetWet > 0 && this.reverb.wet.value <= 0.0001) {
+          const now = this.getToneNowSafe()
+          this.reverb.wet.cancelScheduledValues(now)
+          this.reverb.wet.value = targetWet
+          restored = true
+        }
+      } catch {
+        // Reverb may be mid-build/teardown; ignore.
+      }
+    }
+
+    audioDiag('lifecycle', 'post-background audio output restore for play', {
+      reason,
+      restored,
+      skipTrimVolumeRestore,
+      ...this.getPostBackgroundOutputDiagnostics(),
+    })
+
+    return restored
+  }
+
   applyBackgroundKillSwitchMute(reason = 'background') {
     // A full kill-switch supersedes any reversible pre-mute duck.
     this.backgroundPreMuteActive = false
@@ -13109,7 +13279,9 @@ export class DroneEngine {
           this.masterFinalOutputTrim.volume.setValueAtTime(this.masterFinalOutputTrim.volume.value, now)
           this.masterFinalOutputTrim.volume.linearRampToValueAtTime(-60, now + CLICK_SAFE_RAMP)
           // Hard-mute just after the declick ramp has rendered (well before graph disposal).
-          window.setTimeout(() => {
+          this.clearBackgroundKillSwitchHardMuteTimer()
+          this.backgroundKillSwitchHardMuteTimer = window.setTimeout(() => {
+            this.backgroundKillSwitchHardMuteTimer = null
             try {
               if (this.masterFinalOutputTrim) {
                 this.masterFinalOutputTrim.mute = true
@@ -13225,10 +13397,13 @@ export class DroneEngine {
     // Output is already muted by the kill-switch above. Delay graph/reverb disposal slightly so we
     // do not disconnect live nodes while any last sample is still rendering. The App's
     // onPlaybackInterrupted handler below makes the UI honest.
-    window.setTimeout(() => {
+    this.clearLifecycleGracefulStopTimer()
+    this.lifecycleGracefulStopTimer = window.setTimeout(() => {
+      this.lifecycleGracefulStopTimer = null
       this.stopForLifecycle()
       if (this.masterFinalOutputTrim) {
         try {
+          this.masterFinalOutputTrim.mute = false
           this.masterFinalOutputTrim.volume.cancelScheduledValues(Tone.now())
           this.masterFinalOutputTrim.volume.value = this.getToneLabFinalOutputTrimDb()
         } catch {
@@ -13272,7 +13447,14 @@ export class DroneEngine {
         contextState,
         forceSafeForegroundPlayPending: this.forceSafeForegroundPlayPending === true,
       })
-      return { wasPlaying, wasMetronomePlaying }
+      return {
+        wasPlaying,
+        wasMetronomePlaying,
+        backgroundKillSwitchApplied: false,
+        // Duplicate lifecycle event while the first stop is still tearing down — primer was already
+        // paused by that stop's engine kill-switch.
+        primerPauseOwnedByEngine: this.lifecycleStopInProgress === true,
+      }
     }
 
     this.lifecycleStopInProgress = true
@@ -13316,10 +13498,13 @@ export class DroneEngine {
     // Output + reverb are already silenced by the kill-switch above. Delay graph/reverb disposal
     // slightly so live nodes are not disconnected while a last sample is still rendering, then
     // restore the trim level for next Play.
-    window.setTimeout(() => {
+    this.clearLifecycleGracefulStopTimer()
+    this.lifecycleGracefulStopTimer = window.setTimeout(() => {
+      this.lifecycleGracefulStopTimer = null
       this.stopForLifecycle()
       if (this.masterFinalOutputTrim) {
         try {
+          this.masterFinalOutputTrim.mute = false
           this.masterFinalOutputTrim.volume.cancelScheduledValues(Tone.now())
           this.masterFinalOutputTrim.volume.value = this.getToneLabFinalOutputTrimDb()
         } catch {
@@ -13332,7 +13517,12 @@ export class DroneEngine {
       })
     }, 120)
 
-    return { wasPlaying, wasMetronomePlaying }
+    return {
+      wasPlaying,
+      wasMetronomePlaying,
+      backgroundKillSwitchApplied: true,
+      primerPauseOwnedByEngine: true,
+    }
   }
 
   // On resume after a background stop: clear any stale recovery timers/state and reset the final
@@ -13346,6 +13536,9 @@ export class DroneEngine {
     this.contextInterruptRecoveryInFlight = false
     this.metronomeContextRecoveryDeadline = 0
     this.metronomeStartupRecoveryPending = false
+    this.clearBackgroundKillSwitchHardMuteTimer()
+    this.clearLifecycleGracefulStopTimer()
+    this.lifecycleStopInProgress = false
 
     if (this.masterFinalOutputTrim) {
       try {
