@@ -13,6 +13,7 @@ import {
   testNativePlaybackBeep,
 } from './nativeAudioSession'
 import { ensurePrimerPlaying, getPrimerDebugState } from './iosMediaPrimer'
+import { setNativeDroneVolume, startNativeDrone, stopNativeDrone } from './nativeDroneExperiment'
 import './AudioDebugPanel.css'
 
 function formatJson(value) {
@@ -56,6 +57,7 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
   const [nativeBeepStatus, setNativeBeepStatus] = useState(null)
   const [webBeepPresetStatus, setWebBeepPresetStatus] = useState(null)
   const [primerBeepStatus, setPrimerBeepStatus] = useState(null)
+  const [nativeDroneStatus, setNativeDroneStatus] = useState(null)
   const [engineSnapshot, setEngineSnapshot] = useState(getEngineSnapshot)
 
   const refresh = useCallback(() => {
@@ -335,6 +337,47 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
     }
   }
 
+  // Native drone POC — isolated from the Tone.js engine and the normal Play button.
+  async function handleStartNativeDrone(event) {
+    event.preventDefault()
+    event.stopPropagation()
+    audioDiag('debug-panel', 'NATIVE DRONE START pressed')
+    setNativeDroneStatus({ pending: true, action: 'start' })
+    try {
+      const result = await startNativeDrone(0.2)
+      setNativeDroneStatus({ ...result, action: 'start' })
+    } catch (error) {
+      setNativeDroneStatus({ action: 'start', error: error?.message ?? String(error) })
+    }
+    refresh()
+  }
+
+  async function handleStopNativeDrone(event) {
+    event.preventDefault()
+    event.stopPropagation()
+    audioDiag('debug-panel', 'NATIVE DRONE STOP pressed')
+    try {
+      const result = await stopNativeDrone()
+      setNativeDroneStatus({ ...result, action: 'stop' })
+    } catch (error) {
+      setNativeDroneStatus({ action: 'stop', error: error?.message ?? String(error) })
+    }
+    refresh()
+  }
+
+  async function handleNativeDroneVolume(value, event) {
+    event.preventDefault()
+    event.stopPropagation()
+    audioDiag('debug-panel', 'NATIVE DRONE VOLUME pressed', { value })
+    try {
+      const result = await setNativeDroneVolume(value)
+      setNativeDroneStatus((prev) => ({ ...(prev ?? {}), ...result, action: 'volume' }))
+    } catch (error) {
+      setNativeDroneStatus({ action: 'volume', error: error?.message ?? String(error) })
+    }
+    refresh()
+  }
+
   if (collapsed) {
     return (
       <button
@@ -447,6 +490,15 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
         </div>
       ) : null}
 
+      {nativeDroneStatus ? (
+        <div className="audio-debug-block">
+          <div className="audio-debug-label">Native drone POC (AVAudioSourceNode)</div>
+          <pre className={`audio-debug-pre ${nativeDroneStatus.error ? 'audio-debug-bad' : ''}`}>
+            {formatJson(nativeDroneStatus)}
+          </pre>
+        </div>
+      ) : null}
+
       <div className="audio-debug-buttons">
         <button
           type="button"
@@ -495,6 +547,38 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
           onPointerDown={handleTestMediaPrimerWebBeep}
         >
           TEST MEDIA PRIMER + WEB BEEP
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={handleStartNativeDrone}
+        >
+          START NATIVE DRONE (POC)
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={handleStopNativeDrone}
+        >
+          STOP NATIVE DRONE (POC)
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={(event) => handleNativeDroneVolume(0.05, event)}
+        >
+          NATIVE DRONE VOL 0.05
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={(event) => handleNativeDroneVolume(0.3, event)}
+        >
+          NATIVE DRONE VOL 0.3
         </button>
       </div>
 

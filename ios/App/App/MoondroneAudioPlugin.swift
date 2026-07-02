@@ -223,6 +223,159 @@ public class MoondroneAudioPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 }
 
+// =============================================================================
+// NATIVE DRONE EXPERIMENT (temporary POC — Jul 2026)
+// =============================================================================
+// Isolated proof-of-concept: a continuous native Swift drone rendered by
+// AVAudioEngine + AVAudioSourceNode, completely separate from the Tone.js/WebAudio
+// engine. Purpose is to verify whether native audio survives Silent Mode and
+// lock/background reliably. It does NOT touch the existing MoondroneAudioPlugin,
+// the web engine, or the normal Play button.
+//
+// Revert: delete this marked block + its registration line in
+// MainViewController.capacitorDidLoad(), remove the UIBackgroundModes `audio`
+// key from Info.plist, and delete src/nativeDroneExperiment.js.
+
+/// Continuous native drone: three summed sine partials (root + fifth + octave)
+/// rendered in real time. Kept intentionally simple for the POC.
+final class NativeDroneEngine {
+    private let engine = AVAudioEngine()
+    private var sourceNode: AVAudioSourceNode?
+    private(set) var isRunning = false
+
+    private let sampleRate: Double = 44100.0
+    private var phase0 = 0.0
+    private var phase1 = 0.0
+    private var phase2 = 0.0
+
+    // Master gain 0.0–1.0. Read on the audio render thread; benign to write from main.
+    var volume: Float = 0.2
+
+    private let rootHz = 110.0    // A2
+    private let fifthHz = 164.81  // ~E3
+    private let octaveHz = 220.0  // A3
+
+    func start() throws {
+        if isRunning { return }
+
+        guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else {
+            throw NSError(domain: "NativeDrone", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "could not create AVAudioFormat"])
+        }
+
+        let twoPi = 2.0 * Double.pi
+        let inc0 = twoPi * rootHz / sampleRate
+        let inc1 = twoPi * fifthHz / sampleRate
+        let inc2 = twoPi * octaveHz / sampleRate
+
+        let node = AVAudioSourceNode { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
+            guard let self = self else { return noErr }
+            let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
+            let amp = self.volume
+
+            for frame in 0..<Int(frameCount) {
+                let value = sin(self.phase0) * 0.5 + sin(self.phase1) * 0.3 + sin(self.phase2) * 0.2
+                let sample = Float(value) * amp
+
+                self.phase0 += inc0
+                self.phase1 += inc1
+                self.phase2 += inc2
+                if self.phase0 > twoPi { self.phase0 -= twoPi }
+                if self.phase1 > twoPi { self.phase1 -= twoPi }
+                if self.phase2 > twoPi { self.phase2 -= twoPi }
+
+                for buffer in ablPointer {
+                    guard let dst = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
+                    dst[frame] = sample
+                }
+            }
+            return noErr
+        }
+
+        engine.attach(node)
+        engine.connect(node, to: engine.mainMixerNode, format: format)
+        sourceNode = node
+
+        engine.prepare()
+        try engine.start()
+        isRunning = true
+        print("⚡️ [NativeDrone] engine started (volume \(volume))")
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        engine.stop()
+        if let node = sourceNode {
+            engine.detach(node)
+        }
+        sourceNode = nil
+        isRunning = false
+        print("⚡️ [NativeDrone] engine stopped")
+    }
+
+    func setVolume(_ value: Float) {
+        volume = max(0.0, min(1.0, value))
+    }
+}
+
+/// Capacitor bridge for the native drone POC. Exposed to JS as `NativeDrone`.
+@objc(NativeDronePlugin)
+public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
+    public let identifier = "NativeDronePlugin"
+    public let jsName = "NativeDrone"
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "startNativeDrone", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "stopNativeDrone", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setNativeDroneVolume", returnType: CAPPluginReturnPromise)
+    ]
+
+    private let drone = NativeDroneEngine()
+
+    @objc func startNativeDrone(_ call: CAPPluginCall) {
+        print("⚡️ [NativeDrone] startNativeDrone ENTERED (native Swift)")
+        // Activate the shared `.playback` session only now — when native playback actually starts.
+        let sessionState = AudioSessionManager.configureForPlayback("native-drone-start")
+        let requestedVolume = call.getDouble("volume")
+
+        DispatchQueue.main.async {
+            if let requestedVolume = requestedVolume {
+                self.drone.setVolume(Float(requestedVolume))
+            }
+            do {
+                try self.drone.start()
+                var result = sessionState
+                result["droneRunning"] = true
+                result["engine"] = "AVAudioEngine+AVAudioSourceNode"
+                call.resolve(result)
+            } catch {
+                print("⚡️ [NativeDrone] startNativeDrone FAILED:", error)
+                call.reject("native drone start failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    @objc func stopNativeDrone(_ call: CAPPluginCall) {
+        print("⚡️ [NativeDrone] stopNativeDrone ENTERED (native Swift)")
+        DispatchQueue.main.async {
+            self.drone.stop()
+            call.resolve(["droneRunning": false])
+        }
+    }
+
+    @objc func setNativeDroneVolume(_ call: CAPPluginCall) {
+        guard let value = call.getDouble("value") else {
+            call.reject("setNativeDroneVolume requires a numeric 'value' (0.0–1.0)")
+            return
+        }
+        let clamped = max(0.0, min(1.0, value))
+        self.drone.setVolume(Float(clamped))
+        call.resolve(["volume": clamped])
+    }
+}
+// =============================================================================
+// END NATIVE DRONE EXPERIMENT
+// =============================================================================
+
 /// Custom bridge view controller whose sole job is to register the local `MoondroneAudioPlugin`.
 ///
 /// Wired in Base.lproj/Main.storyboard (customClass=MainViewController, module=App). This is the
@@ -232,5 +385,7 @@ public class MainViewController: CAPBridgeViewController {
     override public func capacitorDidLoad() {
         print("⚡️ [MoondroneAudio] MainViewController.capacitorDidLoad — registering MoondroneAudioPlugin")
         bridge?.registerPluginInstance(MoondroneAudioPlugin())
+        // Native drone POC (temporary — see NATIVE DRONE EXPERIMENT block above).
+        bridge?.registerPluginInstance(NativeDronePlugin())
     }
 }
