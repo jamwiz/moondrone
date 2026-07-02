@@ -124,7 +124,7 @@ export const TONE_LAB_TUNING = {
     // High-pass on the full drone bus. Cuts sub rumble and mud.
     // Range: 20–180 Hz. Lower = more bass; higher = tighter/cleaner low end.
     // Safe default: 35 (gentle, nearly transparent).
-    lowCutHz: 85,
+    lowCutHz: 60,
 
     // Low-pass on the full drone bus. Rolls off brightness/air.
     // Range: 2500–12000 Hz. Lower = darker; higher (12000) = most open.
@@ -137,7 +137,7 @@ export const TONE_LAB_TUNING = {
     // Global clarity lift (Jun 2026): eased low-mid blanket + presence + air so car/
     // phone playback reads brighter without harshness. Still negative in the presence
     // region — warm/soft character preserved.
-    lowMidGainDb: -25,
+    lowMidGainDb: -16,
     lowMidFrequencyHz: 320,
     lowMidQ: 0.8,
 
@@ -146,7 +146,7 @@ export const TONE_LAB_TUNING = {
     // car, and small speakers without simply making it brighter.
     // Positive = more projection / forwardness; negative = softer / more recessed.
     // Range: -3 to +3 dB. Safe default: 0 (transparent).
-    speakerPresenceGainDb: -20,
+    speakerPresenceGainDb: -16,
     speakerPresenceFrequencyHz: 520,
     speakerPresenceQ: 0.9,
 
@@ -157,13 +157,13 @@ export const TONE_LAB_TUNING = {
     // overtone articulation.
     // Range: -6 to +3 dB. Safe default: 0 (neutral).
     // Examples: -2 dB = smoother; -4 dB = very soft / meditation-oriented; +1 dB = more presence.
-    highMidGainDb: 20,
-    highMidFrequencyHz: 1750,
+    highMidGainDb: 16,
+    highMidFrequencyHz: 1500,
     highMidQ: 0.45,
 
     // High shelf “air” band (~4.2 kHz). Added on top of AIR_SHIMMER air shelf.
     // Range: -2 to +3 dB. Safe default: 0 (no extra air from Tone Lab).
-    airGainDb: 11,
+    airGainDb: 14,
     airFrequencyHz: 4200,
     airQ: 0.45,
 
@@ -182,7 +182,7 @@ export const TONE_LAB_TUNING = {
   harmonicLayer: {
     // Scales all Tone-Lab-aware harmonic partials (AIR_SHIMMER partials underneath).
     // Range: 0–1.5. 0 = no added harmonics; 1 = current; >1 = more shimmer.
-    gain: 0.75,
+    gain: 0.7,
   },
 
   // ---------------------------------------------------------------------------
@@ -196,7 +196,7 @@ export const TONE_LAB_TUNING = {
 
     // Tone control for the phase harmonic layer — bloom shelf swing and orbit shimmer.
     // Range: 0–1.5. 0 = darker/smoother; 1 = current; >1 = brighter (cautious).
-    brightness: 1.5,
+    brightness: 2,
 
     // How much the phase harmonic layer moves (orbit sweep, bloom, eclipse, orbit cents).
     // Range: 0–1.5. 0 = steady; 1 = current motion.
@@ -239,7 +239,7 @@ export const TONE_LAB_TUNING = {
   stereo: {
     // Multiplies computed stereo width after preset/mood offsets.
     // Range: 0–1.5. 0 = mono; 1 = current width; >1 = wider (clamped to 1).
-    width: 1.15,
+    width: 1.4,
   },
 
   // ---------------------------------------------------------------------------
@@ -257,7 +257,7 @@ export const TONE_LAB_TUNING = {
     // Compressor strength macro. 1 = current MASTER_TUNING glue level.
     // Range: 0–1.5. Lower = gentler/less squash; higher = more glue (watch pumping).
     // Maps to threshold, ratio, and makeup — not a blind crush.
-    compressorAmount: 1.4,
+    compressorAmount: 3,
 
     // Final post-limiter output trim. Use mainly for attenuation after mastering.
     // Positive values can exceed the limiter ceiling and may clip device output.

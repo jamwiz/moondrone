@@ -33,6 +33,187 @@
  */
 
 // =============================================================================
+// PHONE SPEAKER PRESET REVOICE (reversible — Jul 2026)
+// =============================================================================
+// Brings non-Titan moons closer to Strings/Titan perceived loudness on iPhone speakers
+// by rebalancing upper harmonics and easing low-mid masking. Titan/Strings stays the
+// reference and is intentionally unchanged.
+//
+// Revert: set ENABLE_PHONE_SPEAKER_PRESET_REVOICE = false (only change needed).
+export const ENABLE_PHONE_SPEAKER_PRESET_REVOICE = true
+
+function mergeShallowPresetMap(base, overrides) {
+  return { ...base, ...overrides }
+}
+
+function mergePresetRegisterVoicing(base, overrides) {
+  const merged = structuredClone(base)
+  for (const [preset, registers] of Object.entries(overrides)) {
+    merged[preset] ??= {}
+    for (const [reg, indices] of Object.entries(registers)) {
+      merged[preset][reg] = { ...(merged[preset][reg] ?? {}), ...indices }
+    }
+  }
+  return merged
+}
+
+function mergePresetAirShimmerScale(base, overrides) {
+  const merged = structuredClone(base)
+  for (const [preset, profile] of Object.entries(overrides)) {
+    merged[preset] = {
+      ...(merged[preset] ?? {}),
+      ...profile,
+      register: {
+        ...(merged[preset]?.register ?? {}),
+        ...(profile.register ?? {}),
+      },
+    }
+  }
+  return merged
+}
+
+function applyPhoneSpeakerPresetVoicing(base, phoneOverrides, { mergeRegisterVoicing = false, mergeAirShimmer = false } = {}) {
+  if (!ENABLE_PHONE_SPEAKER_PRESET_REVOICE) {
+    return base
+  }
+
+  if (mergeRegisterVoicing) {
+    return mergePresetRegisterVoicing(base, phoneOverrides)
+  }
+
+  if (mergeAirShimmer) {
+    return mergePresetAirShimmerScale(base, phoneOverrides)
+  }
+
+  return mergeShallowPresetMap(base, phoneOverrides)
+}
+
+// Phone-speaker revoice overrides (merged into legacy tables when flag is true).
+const PHONE_SPEAKER_PRESET_BALANCE_TRIM_DB = {
+  Pure: 1.05,
+  Shruti: 0.95,
+  Choir: 0.35,
+  Cosmos: 0.2,
+  Binaural: 0.3,
+}
+
+const PHONE_SPEAKER_PRESET_VOICE_GAINS = {
+  // Mimas: keep sine purity; lift +12/+24/+31 for phone projection, ease −12/root slightly.
+  Pure: [0.06, 0.21, 0.003, 0.085, 0.014, 0.005],
+  // Europa: more upper-octave clarity; less chesty root/fifth in the bed.
+  Shruti: [0.056, 0.33, 0.11, 0.022, 0.048, 0.014],
+  // Io: less low haze; more octave/upper-fifth/sky projection.
+  Cosmos: [0.038, 0.25, 0.14, 0.24, 0.29, 0.14],
+  Choir: [0.038, 0.37, 0.26, 0.28, 0.21, 0.1],
+  // Principal/upper clarity on phone; undertone layers eased, not removed.
+  Binaural: [0.048, 0.35, 0.14, 0.13, 0.078, 0.034],
+}
+
+const PHONE_SPEAKER_LOW_MID_REGISTER_VOICING = {
+  Pure: {
+    2: { 0: 1, 1: 0.62, 3: 0.88 },
+    3: { 0: 0.78, 1: 0.65, 3: 0.92 },
+  },
+  Shruti: {
+    2: { 0: 0.72, 1: 0.78, 2: 0.74 },
+    3: { 0: 0.74, 1: 0.8, 2: 0.76 },
+  },
+  Cosmos: {
+    2: { 0: 0.78, 1: 0.78, 2: 0.86 },
+    3: { 0: 0.8, 1: 0.8, 2: 0.86, 6: 0.72 },
+  },
+  Binaural: {
+    2: { 0: 0.52, 1: 0.58, 2: 0.56, 3: 0.72 },
+    3: { 0: 0.56, 1: 0.3, 2: 0.58, 3: 0.72 },
+  },
+}
+
+const PHONE_SPEAKER_AIR_SHIMMER_GAIN_SCALE = {
+  Pure: {
+    default: 0.76,
+    register: {
+      4: 0.68,
+      5: 0.62,
+    },
+  },
+  Shruti: {
+    default: 0.72,
+    register: {
+      3: 0.68,
+      4: 0.74,
+    },
+  },
+  Cosmos: {
+    default: 0.98,
+    register: {
+      4: 0.92,
+      5: 0.88,
+    },
+  },
+  Binaural: {
+    default: 1.1,
+    register: {
+      2: 0.94,
+      3: 0.98,
+    },
+  },
+}
+
+const PHONE_SPEAKER_COSMOS_EXTENSION_GAINS = {
+  celestial: 0.055,
+  skyRoot: 0.034,
+  skyOctave: 0.032,
+}
+
+// Io/Cosmos sky extension — High subtle ease; VH anti-clip preserved from prior pass.
+const PHONE_SPEAKER_COSMOS_EXTENSION_SCALE = {
+  4: 0.7,
+  5: 0.42,
+}
+
+const PHONE_SPEAKER_PRESET_REGISTER_BALANCE_TRIM_DB = {
+  Pure: {
+    4: -0.5,
+    5: -2.5,
+  },
+  Choir: {
+    4: 0.4,
+    5: 0.6,
+  },
+  // Io/Cosmos: VH output trim only — High register unchanged.
+  Cosmos: {
+    5: -3.25,
+  },
+}
+
+const PHONE_SPEAKER_PRESET_REGISTER_VOICE_GAIN_SCALE = {
+  Pure: {
+    3: { 3: 1.06 },
+    4: { 3: 0.96, 4: 0.62 },
+    5: { 3: 1.85, 4: 0.32 },
+  },
+  Strings: {
+    // Titan/Strings: Medium −12 low octave too loud on phone speakers.
+    3: { 0: 0.6 },
+  },
+  Shruti: {
+    3: { 4: 1.12 },
+    4: { 4: 1.08 },
+    // Europa/Shruti: VH upper octave pressure ease.
+    5: { 3: 0.72, 4: 0.62, 5: 0.6 },
+  },
+  Cosmos: {
+    // Io/Cosmos: High upper octave/sky pressure ease (VH anti-clip unchanged below).
+    4: { 3: 0.78, 4: 0.7, 5: 0.66 },
+    5: { 3: 0.72, 4: 0.66, 5: 0.60 },
+  },
+  Binaural: {
+    4: { 3: 0.88, 4: 0.84, 5: 0.8 },
+    5: { 3: 0.86, 4: 0.82, 5: 0.78 },
+  },
+}
+
+// =============================================================================
 // 1. PRESET VOICE BALANCE
 // =============================================================================
 // Voice index order for all six-layer presets:
@@ -42,7 +223,7 @@
 // Raise a layer → more energy at that interval (warmer, brighter, or airier).
 // Lower a layer → less congestion; may reduce projection if over-done.
 
-export const PRESET_VOICE_GAINS = {
+const LEGACY_PRESET_VOICE_GAINS = {
   // Pure (Mimas): sine root + quiet −12 triangle body; +12 carries float. Less triangle
   // energy — space/harmonics over body weight (see register tables for VH octave-up).
   Pure: [0.072, 0.24, 0.003, 0.062, 0.003, 0],
@@ -52,6 +233,11 @@ export const PRESET_VOICE_GAINS = {
   Cosmos: [0.045, 0.30, 0.18, 0.20, 0.23, 0.11],
   Binaural: [0.055, 0.38, 0.17, 0.10, 0.055, 0.025],
 }
+
+export const PRESET_VOICE_GAINS = applyPhoneSpeakerPresetVoicing(
+  LEGACY_PRESET_VOICE_GAINS,
+  PHONE_SPEAKER_PRESET_VOICE_GAINS,
+)
 
 // Per-preset oscillator waveform overrides (Tone.js types). Only listed indices
 // change — everything else follows getVoiceOscillatorType defaults in the engine.
@@ -111,11 +297,16 @@ export const DEFAULT_BINAURAL_MODE_ID = 'theta'
 export const DEFAULT_PRESET = PRESETS.find((preset) => preset.name === 'Shruti')
 
 // Cosmos-only sky layers (indices 8–10 in engine). Raise for more float; lower for less buzz.
-export const COSMOS_EXTENSION_GAINS = {
+const LEGACY_COSMOS_EXTENSION_GAINS = {
   celestial: 0.042,
   skyRoot: 0.026,
   skyOctave: 0.022,
 }
+
+export const COSMOS_EXTENSION_GAINS = applyPhoneSpeakerPresetVoicing(
+  LEGACY_COSMOS_EXTENSION_GAINS,
+  PHONE_SPEAKER_COSMOS_EXTENSION_GAINS,
+)
 
 // Foundation root multiplier (Shruti High/Very High, Cosmos). Lower → less low-mid weight.
 export const FOUNDATION_ROOT_GAIN = 0.54
@@ -131,7 +322,7 @@ export const PRESET_FOUNDATION_ROOT_GAIN = {
 // the global bass shelf, projection EQ, or routing. Voice indices:
 //   0 = −12 low octave   1 = root   2 = fifth   6 = foundation root (Cosmos const root)
 // Only listed presets/registers/indices are affected; everything else stays at 1.
-export const PRESET_LOW_MID_REGISTER_VOICING = {
+const LEGACY_PRESET_LOW_MID_REGISTER_VOICING = {
   // Shruti (Europa): hollow low-mid — ease −12, root, and fifth in Low/Medium;
   // warmth from root + reverb, not chesty body density.
   Shruti: {
@@ -159,6 +350,12 @@ export const PRESET_LOW_MID_REGISTER_VOICING = {
     3: { 0: 0.62, 1: 0.34, 2: 0.64, 3: 0.78 },
   },
 }
+
+export const PRESET_LOW_MID_REGISTER_VOICING = applyPhoneSpeakerPresetVoicing(
+  LEGACY_PRESET_LOW_MID_REGISTER_VOICING,
+  PHONE_SPEAKER_LOW_MID_REGISTER_VOICING,
+  { mergeRegisterVoicing: true },
+)
 
 // Binaural headphone undertones (not register foundations).
 export const BINAURAL_UNDERTONE_GAIN = 0.064
@@ -353,7 +550,7 @@ export const REGISTER_OCTAVES = {
   VERY_HIGH: 5,
 }
 
-export const PRESET_BALANCE_TRIM_DB = {
+const LEGACY_PRESET_BALANCE_TRIM_DB = {
   // Level-match after Mimas hollow reshape (not octave-up global trim).
   Pure: 0.55,
   Shruti: 0.38,
@@ -364,6 +561,11 @@ export const PRESET_BALANCE_TRIM_DB = {
   // Gentle static level match / beat headroom — Low/Med voicing trims do most of the work.
   Binaural: -1.35,
 }
+
+export const PRESET_BALANCE_TRIM_DB = applyPhoneSpeakerPresetVoicing(
+  LEGACY_PRESET_BALANCE_TRIM_DB,
+  PHONE_SPEAKER_PRESET_BALANCE_TRIM_DB,
+)
 
 // High / Very High were at −5 / −4 dB — so aggressive that those registers were
 // both quiet AND still harsh (the cut lowered level but not the upper-harmonic
@@ -378,7 +580,7 @@ export const REGISTER_BALANCE_TRIM_DB = {
 
 // Per-preset register loudness trims (output stage, additive dB on top of REGISTER_BALANCE_TRIM_DB).
 // Only listed presets/registers are affected; Shruti (Europa) is intentionally omitted.
-export const PRESET_REGISTER_BALANCE_TRIM_DB = {
+const LEGACY_PRESET_REGISTER_BALANCE_TRIM_DB = {
   Pure: {
     [REGISTER_OCTAVES.HIGH]: -1,
     [REGISTER_OCTAVES.VERY_HIGH]: -3.5,
@@ -398,10 +600,16 @@ export const PRESET_REGISTER_BALANCE_TRIM_DB = {
   },
 }
 
+export const PRESET_REGISTER_BALANCE_TRIM_DB = applyPhoneSpeakerPresetVoicing(
+  LEGACY_PRESET_REGISTER_BALANCE_TRIM_DB,
+  PHONE_SPEAKER_PRESET_REGISTER_BALANCE_TRIM_DB,
+  { mergeRegisterVoicing: true },
+)
+
 // Per-preset air / breath / shimmer gain scale (multiplicative, 1 = unchanged).
 // Applies to breath-noise bed, AIR harmonic partials, and the air shelf. Optional
 // register overrides — Low gets the strongest cut for Mimas/Titan.
-export const PRESET_AIR_SHIMMER_GAIN_SCALE = {
+const LEGACY_PRESET_AIR_SHIMMER_GAIN_SCALE = {
   Pure: {
     default: 0.62,
     register: {
@@ -435,6 +643,12 @@ export const PRESET_AIR_SHIMMER_GAIN_SCALE = {
     },
   },
 }
+
+export const PRESET_AIR_SHIMMER_GAIN_SCALE = applyPhoneSpeakerPresetVoicing(
+  LEGACY_PRESET_AIR_SHIMMER_GAIN_SCALE,
+  PHONE_SPEAKER_AIR_SHIMMER_GAIN_SCALE,
+  { mergeAirShimmer: true },
+)
 
 // Mimas (Pure) + Europa (Shruti): compress AIR/wind/shimmer only at high Breath slider.
 // Unity at/below breathUiKnee; progressive reduction above the knee (not a flat cut).
@@ -498,7 +712,7 @@ export const PRESET_REGISTER_VOICE_PRESENCE_MULTIPLIER = {
 
 // Per-preset, per-register voice gain scale (multiplicative, 1 = unchanged).
 // Only listed preset/register/voice indices are trimmed — not whole-register output.
-export const PRESET_REGISTER_VOICE_GAIN_SCALE = {
+const LEGACY_PRESET_REGISTER_VOICE_GAIN_SCALE = {
   // Europa: extra low-mid relief at Low/Medium (all registers above use SHRUTI_REGISTER_DAMPING).
   Shruti: {
     [REGISTER_OCTAVES.LOW]: { 0: 0.88, 1: 0.86, 2: 0.84 },
@@ -540,6 +754,12 @@ export const PRESET_REGISTER_VOICE_GAIN_SCALE = {
     },
   },
 }
+
+export const PRESET_REGISTER_VOICE_GAIN_SCALE = applyPhoneSpeakerPresetVoicing(
+  LEGACY_PRESET_REGISTER_VOICE_GAIN_SCALE,
+  PHONE_SPEAKER_PRESET_REGISTER_VOICE_GAIN_SCALE,
+  { mergeRegisterVoicing: true },
+)
 
 // Per-preset Breath-cycle gain follow on core body layers (indices 0, 1, 3).
 // Multiplies breathMotion × breathScale only — same envelope, no pitch LFO.
@@ -913,6 +1133,19 @@ export const MASTER_TUNING = {
   meteringEnabled: false,
 }
 
+const LEGACY_SPEAKER_COSMOS_EXTENSION_SCALE = {
+  [REGISTER_OCTAVES.HIGH]: 0.8,
+  [REGISTER_OCTAVES.VERY_HIGH]: 0.62,
+}
+
+function getSpeakerCosmosExtensionScale() {
+  if (!ENABLE_PHONE_SPEAKER_PRESET_REVOICE) {
+    return LEGACY_SPEAKER_COSMOS_EXTENSION_SCALE
+  }
+
+  return { ...LEGACY_SPEAKER_COSMOS_EXTENSION_SCALE, ...PHONE_SPEAKER_COSMOS_EXTENSION_SCALE }
+}
+
 export const SPEAKER_SAFETY_TUNING = {
   // Global low shelf — reduces sub/low buildup. Slightly deeper for external speakers.
   bassShelfFrequency: 210,
@@ -951,10 +1184,7 @@ export const SPEAKER_SAFETY_TUNING = {
     [REGISTER_OCTAVES.VERY_HIGH]: { 3: 0.82, 4: 0.45, 5: 0.35 },
   },
 
-  cosmosExtensionScale: {
-    [REGISTER_OCTAVES.HIGH]: 0.8,
-    [REGISTER_OCTAVES.VERY_HIGH]: 0.62,
-  },
+  cosmosExtensionScale: getSpeakerCosmosExtensionScale(),
 
   choirUpperHarmonicMultiplier: {
     [REGISTER_OCTAVES.HIGH]: 0.9,
