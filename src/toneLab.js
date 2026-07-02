@@ -124,12 +124,12 @@ export const TONE_LAB_TUNING = {
     // High-pass on the full drone bus. Cuts sub rumble and mud.
     // Range: 20–180 Hz. Lower = more bass; higher = tighter/cleaner low end.
     // Safe default: 35 (gentle, nearly transparent).
-    lowCutHz: 100,
+    lowCutHz: 105,
 
     // Low-pass on the full drone bus. Rolls off brightness/air.
     // Range: 2500–12000 Hz. Lower = darker; higher (12000) = most open.
     // Safe default: 12000 (minimal rolloff — matches pre-Tone-Lab openness).
-    highCutHz: 12000,
+    highCutHz: 11500,
 
     // Broad peaking EQ around 200–500 Hz (center ~320 Hz).
     // Negative = less warmth/mud; positive = fuller body.
@@ -137,18 +137,18 @@ export const TONE_LAB_TUNING = {
     // Global clarity lift (Jun 2026): eased low-mid blanket + presence + air so car/
     // phone playback reads brighter without harshness. Still negative in the presence
     // region — warm/soft character preserved.
-    lowMidGainDb: -22,
-    lowMidFrequencyHz: 320,
-    lowMidQ: 0.1,
+    lowMidGainDb: -8.5,
+    lowMidFrequencyHz: 380,
+    lowMidQ: 0.75,
 
     // Broad phone / small-speaker presence band (~1.2–2 kHz). Independent from
     // highMidGainDb (harshness / upper-mid bite). Helps the drone read on iPhone,
     // car, and small speakers without simply making it brighter.
     // Positive = more projection / forwardness; negative = softer / more recessed.
     // Range: -3 to +3 dB. Safe default: 0 (transparent).
-    speakerPresenceGainDb: 3,
-    speakerPresenceFrequencyHz: 1600,
-    speakerPresenceQ: 0.1,
+    speakerPresenceGainDb: -4.5,
+    speakerPresenceFrequencyHz: 850,
+    speakerPresenceQ: 0.85,
 
     // Broad peaking EQ around 2–3 kHz (center ~2500 Hz) — the presence / harshness /
     // nasal / digital-edge / upper-harmonic-bite region. Targets fatigue from
@@ -157,21 +157,21 @@ export const TONE_LAB_TUNING = {
     // overtone articulation.
     // Range: -6 to +3 dB. Safe default: 0 (neutral).
     // Examples: -2 dB = smoother; -4 dB = very soft / meditation-oriented; +1 dB = more presence.
-    highMidGainDb: -3,
-    highMidFrequencyHz: 2500,
-    highMidQ: 0.85,
+    highMidGainDb: -2.5,
+    highMidFrequencyHz: 2300,
+    highMidQ: 0.9,
 
     // High shelf “air” band (~4.2 kHz). Added on top of AIR_SHIMMER air shelf.
     // Range: -2 to +3 dB. Safe default: 0 (no extra air from Tone Lab).
-    airGainDb: 12.5,
+    airGainDb: 6,
     airFrequencyHz: 4200,
-    airQ: 0.1,
+    airQ: 0.45,
 
     // Upper-air / sparkle band (~7 kHz). Independent from airGainDb (~4.2 kHz).
     // Controls shimmer, gloss, whisp, and top-end edge — not general openness.
     // Positive = more sparkle and top-end openness; negative = softer, less hiss/whisp.
     // Range: -3 to +3 dB. Safe default: 0 (transparent).
-    upperAirGainDb: 3,
+    upperAirGainDb: 2,
     upperAirFrequencyHz: 7600,
     upperAirQ: 0.55,
   },
@@ -182,7 +182,7 @@ export const TONE_LAB_TUNING = {
   harmonicLayer: {
     // Scales all Tone-Lab-aware harmonic partials (AIR_SHIMMER partials underneath).
     // Range: 0–1.5. 0 = no added harmonics; 1 = current; >1 = more shimmer.
-    gain: .8,
+    gain: 0.75,
   },
 
   // ---------------------------------------------------------------------------
@@ -192,11 +192,11 @@ export const TONE_LAB_TUNING = {
     // Global volume for the mood harmonic layer (True Orbit pair, per-voice orbit
     // cents, harmonic bloom redistribution, Super dual beats, bloom EQ level).
     // Range: 0–1.5. 0 = off; 1 = current behavior.
-    gain: .3,
+    gain: 0.25,
 
     // Tone control for the phase harmonic layer — bloom shelf swing and orbit shimmer.
     // Range: 0–1.5. 0 = darker/smoother; 1 = current; >1 = brighter (cautious).
-    brightness: 5,
+    brightness: 1.4,
 
     // How much the phase harmonic layer moves (orbit sweep, bloom, eclipse, orbit cents).
     // Range: 0–1.5. 0 = steady; 1 = current motion.
@@ -209,28 +209,28 @@ export const TONE_LAB_TUNING = {
   breathAir: {
     // Global breath-noise level multiplier.
     // Range: 0–1.5. 0 = silence noise layer; 1 = current amount.
-    gain: .5,
+    gain: 0.4,
 
     // Shifts noise darker (0) ↔ brighter (1) via HPF/LPF endpoints.
     // 0.5 = calibrated to match current AIR_SHIMMER breath filter range.
-    tone: 0.5,
+    tone: 0.55,
 
     // How strongly noise follows the Breath cycle swell.
     // Range: 0–1.5. 0 = flat; 1 = current motion; >1 = more obvious swell.
-    motionDepth: 1.5,
+    motionDepth: 1.15,
 
     // --- Soft breath envelope (no hard on/off gate) ---
     // Subtle bed at cycle trough when Breath slider > 0 (not obvious hiss).
     // Range: 0–0.25. Safe default: 0.1.
-    floorLevel: 0.5,
+    floorLevel: 0.16,
 
     // Soft-knee on the breath curve — lower = smoother, less abrupt.
     // Range: 0.2–1.2. Safe default: 0.42.
-    swellSoftness: 0.2,
+    swellSoftness: 0.38,
 
     // Peak sharpness — lower = more gradual swell/fade.
     // Range: 0.5–1.5. Safe default: 0.88.
-    swellShape: 0.77,
+    swellShape: 0.82,
   },
 
   // ---------------------------------------------------------------------------
@@ -239,7 +239,7 @@ export const TONE_LAB_TUNING = {
   stereo: {
     // Multiplies computed stereo width after preset/mood offsets.
     // Range: 0–1.5. 0 = mono; 1 = current width; >1 = wider (clamped to 1).
-    width: 1.5,
+    width: 1.15,
   },
 
   // ---------------------------------------------------------------------------
@@ -248,21 +248,21 @@ export const TONE_LAB_TUNING = {
   dynamics: {
     // Final output trim before the master stage (replaces AIR overallLoudnessTrimDb).
     // Range: -6 to +2 dB. Safe default: -1 (matches current overall trim).
-    outputTrimDb: 0,
+    outputTrimDb: 2,
 
     // Brick-wall limiter ceiling (dBFS).
     // Range: -3 to -0.5 dB. Safe default: -1.5.
-    limiterCeilingDb: -1,
+    limiterCeilingDb: -1.5,
 
     // Compressor strength macro. 1 = current MASTER_TUNING glue level.
     // Range: 0–1.5. Lower = gentler/less squash; higher = more glue (watch pumping).
     // Maps to threshold, ratio, and makeup — not a blind crush.
-    compressorAmount: 1.25,
+    compressorAmount: 1.35,
 
     // Final post-limiter output trim. Use mainly for attenuation after mastering.
     // Positive values can exceed the limiter ceiling and may clip device output.
     // Calibrated 2026 via dev output meter (+3 dB vs prior 0 dB default).
-    finalOutputTrimDb: 20,
+    finalOutputTrimDb: 3,
   },
 }
 
