@@ -405,6 +405,9 @@ export class DroneEngine {
     // Deferred graceful lifecycle teardown (stopForLifecycle after declick). Cancelled if the user
     // presses Play before it fires so a fresh start is not torn down mid-flight.
     this.lifecycleGracefulStopTimer = null
+    // Debounced post-control integrity check while already playing (moon/register/key/phase).
+    this.playingAudioIntegrityCheckTimer = null
+    this.playingAudioIntegrityCheckToken = 0
     // Set at the moment start() commits to playing; the confirmation window measures interruptions
     // relative to this.
     this.currentPlayStartedAt = 0
@@ -815,6 +818,8 @@ export class DroneEngine {
       this.rampVoiceGainForStop(voice, stopTime)
     })
     this.stopFadeEndsAt = stopTime + STOP_FADE_SECONDS + 0.01
+    this.playingAudioIntegrityCheckToken += 1
+    this.clearPlayingAudioIntegrityCheckTimer()
     this.isPlaying = false
     this.isStarting = false
     this.pendingStartupNote = null
@@ -977,6 +982,9 @@ export class DroneEngine {
     this.pendingNoteChangeFrom = { key: this.currentKey, octave: this.currentOctave }
     this.currentKey = key
     this.updateFrequencies()
+    if (this.isPlaying) {
+      this.schedulePlayingAudioIntegrityCheck('key-change')
+    }
   }
 
   setOctave(octave) {
@@ -1012,6 +1020,7 @@ export class DroneEngine {
       if (wasPlaying) {
         // Register output trim + bus EQ wait until the crossfade finishes so
         // High/VH lifts never step on audible outgoing Titan layers.
+        this.schedulePlayingAudioIntegrityCheck('register-change')
         return
       }
 
@@ -1614,6 +1623,9 @@ export class DroneEngine {
 
     this.logTransitionDiagnostic('setMood', { moodId, playing: this.isPlaying })
     this.reanchorMood()
+    if (this.isPlaying) {
+      this.schedulePlayingAudioIntegrityCheck('phase-change')
+    }
   }
 
   getMoodConfig() {
@@ -4219,6 +4231,9 @@ export class DroneEngine {
       mood: this.mood,
     })
     this.applyPreset(previousPresetName)
+    if (this.isPlaying) {
+      this.schedulePlayingAudioIntegrityCheck('moon-change')
+    }
   }
 
   setBinauralBeatHz(beatHz) {
@@ -7921,6 +7936,10 @@ export class DroneEngine {
       breathCyclePosition: this.getBreathCyclePosition(),
       useTail,
     })
+
+    window.setTimeout(() => {
+      this.schedulePlayingAudioIntegrityCheck('simple-moon-transition-handoff')
+    }, Math.round(timing.moonFadeInSeconds * 1000) + 200)
   }
 
   // =====================================================================================
@@ -8705,6 +8724,7 @@ export class DroneEngine {
 
         if (label === 'crossfade-end') {
           this.logFullChainSettleDiagnostics('crossfade-end', ctx.transitionSnapshot, ctx)
+          this.schedulePlayingAudioIntegrityCheck('full-chain-crossfade-handoff')
         }
       }, delaySeconds * 1000)
 
@@ -12679,6 +12699,264 @@ export class DroneEngine {
       repair: 'reassert-output-level',
     })
     this.applyDroneMetronomeHeadroom()
+  }
+
+  clearPlayingAudioIntegrityCheckTimer() {
+    if (this.playingAudioIntegrityCheckTimer != null) {
+      window.clearTimeout(this.playingAudioIntegrityCheckTimer)
+      this.playingAudioIntegrityCheckTimer = null
+    }
+  }
+
+  isPlayingAudioTransitionActive(time = Tone.now()) {
+    if (this.simpleMoonTransitionTimeoutId != null) {
+      return true
+    }
+
+    if (this.fullChainTransitionContext != null) {
+      return true
+    }
+
+    if ((this.fullChainCrossfadeDecks?.length ?? 0) > 0) {
+      return true
+    }
+
+    if (time < this.fullChainCrossfadeVoiceHoldUntil) {
+      return true
+    }
+
+    if (time < this.presetTransitionEndsAt) {
+      return true
+    }
+
+    if (time < this.noteCrossfadeEndsAt) {
+      return true
+    }
+
+    if (this.isMoonTransitionAuxHandoffActive(time)) {
+      return true
+    }
+
+    if (this.isMoonAuxLayerCrossfadeActive?.()) {
+      return true
+    }
+
+    return false
+  }
+
+  getPlayingAudioIntegritySnapshot(reason, extra = {}) {
+    let finalOutputMuted = null
+    let finalOutputTrimDb = null
+    let moonTransitionGroupGain = null
+
+    try {
+      if (this.masterFinalOutputTrim) {
+        finalOutputMuted = this.masterFinalOutputTrim.mute === true
+        finalOutputTrimDb = Number(this.masterFinalOutputTrim.volume.value.toFixed(2))
+      }
+    } catch {
+      finalOutputMuted = 'error'
+    }
+
+    try {
+      if (this.moonTransitionGain) {
+        moonTransitionGroupGain = Number(this.moonTransitionGain.gain.value.toFixed(4))
+      }
+    } catch {
+      moonTransitionGroupGain = 'error'
+    }
+
+    return {
+      reason,
+      contextState: this.getContextState(),
+      isPlaying: this.isPlaying === true,
+      isReady: this.isReady === true,
+      masterChainReady: this.masterChainReady === true,
+      finalOutputMuted,
+      finalOutputTrimDb,
+      outputExists: Boolean(this.output),
+      currentPreset: this.currentPreset?.name ?? null,
+      moonTransitionMode: this.moonTransitionMode,
+      transitionActive: this.isPlayingAudioTransitionActive(),
+      moonTransitionGroupGain,
+      presetTransitionEndsAt: this.presetTransitionEndsAt,
+      noteCrossfadeEndsAt: this.noteCrossfadeEndsAt,
+      simpleFadeTimerActive: this.simpleMoonTransitionTimeoutId != null,
+      fullChainTransitionActive: this.fullChainTransitionContext != null,
+      ...extra,
+    }
+  }
+
+  isPlayingFinalOutputSilent() {
+    return this.isPostBackgroundOutputStillMuted({ requireAudibleTrim: true })
+  }
+
+  isPlayingTransitionGroupGainStuck() {
+    if (this.isPlayingAudioTransitionActive()) {
+      return false
+    }
+
+    if (!this.moonTransitionGain) {
+      return false
+    }
+
+    try {
+      return this.moonTransitionGain.gain.value <= 0.01
+    } catch {
+      return false
+    }
+  }
+
+  isPlayingAudioIntegrityStillBroken() {
+    if (!this.isReady || !this.masterChainReady || !this.output) {
+      return true
+    }
+
+    if (this.isPlayingFinalOutputSilent()) {
+      return true
+    }
+
+    if (this.isPlayingTransitionGroupGainStuck()) {
+      return true
+    }
+
+    return false
+  }
+
+  schedulePlayingAudioIntegrityCheck(reason = 'control-change') {
+    if (!this.isPlaying) {
+      return
+    }
+
+    this.clearPlayingAudioIntegrityCheckTimer()
+    const token = this.playingAudioIntegrityCheckToken + 1
+    this.playingAudioIntegrityCheckToken = token
+
+    this.playingAudioIntegrityCheckTimer = window.setTimeout(() => {
+      this.playingAudioIntegrityCheckTimer = null
+      if (token !== this.playingAudioIntegrityCheckToken || !this.isPlaying) {
+        return
+      }
+
+      void this.checkAndRepairPlayingAudioIntegrity(reason)
+    }, 900)
+  }
+
+  repairPlayingFinalOutputIfSilent() {
+    const RAMP_SECONDS = 0.08
+    const now = this.getToneNowSafe()
+    const targetDb = this.getToneLabFinalOutputTrimDb()
+
+    if (this.masterFinalOutputTrim) {
+      try {
+        this.masterFinalOutputTrim.mute = false
+        this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
+        let startDb = -60
+        try {
+          startDb = this.masterFinalOutputTrim.volume.value <= -59.5
+            ? -60
+            : this.masterFinalOutputTrim.volume.value
+        } catch {
+          startDb = -60
+        }
+        this.masterFinalOutputTrim.volume.setValueAtTime(startDb, now)
+        this.masterFinalOutputTrim.volume.linearRampToValueAtTime(targetDb, now + RAMP_SECONDS)
+      } catch {
+        return false
+      }
+    }
+
+    try {
+      this.applyVolume(RAMP_SECONDS)
+    } catch {
+      // Volume nodes may be mid-transition; ignore.
+    }
+
+    return true
+  }
+
+  repairPlayingTransitionOutputIfSilent() {
+    this.clearSimpleMoonTransitionTimeout()
+    this.resetMoonTransitionGroupGain()
+    this.resetMoonTransitionBloom()
+
+    try {
+      this.applyVolume(0.08)
+      this.applyIntensity(false, 0.08)
+      this.updateFrequencies()
+    } catch {
+      // Graph may be mid-transition; ignore.
+    }
+
+    return true
+  }
+
+  forcePlayingAudioIntegrityHonestStop(reason, snapshot = {}) {
+    audioDiag('lifecycle', 'playing audio integrity repair failed — forcing honest stopped state', {
+      reason,
+      ...snapshot,
+    })
+    this.isPlaying = false
+    if (this.onPlaybackInterrupted) {
+      try {
+        this.onPlaybackInterrupted({
+          wasPlaying: true,
+          wasMetronomePlaying: this.metronomePlaying === true,
+        })
+      } catch {
+        // UI hook failure must never break audio.
+      }
+    }
+  }
+
+  async checkAndRepairPlayingAudioIntegrity(reason = 'control-change') {
+    if (!this.isPlaying) {
+      return true
+    }
+
+    const snapshot = this.getPlayingAudioIntegritySnapshot(reason)
+    audioDiag('lifecycle', 'playing audio integrity check', snapshot)
+
+    if (!this.isReady || !this.masterChainReady || !this.output) {
+      this.forcePlayingAudioIntegrityHonestStop(reason, snapshot)
+      return false
+    }
+
+    let repairedSomething = false
+
+    if (this.getContextState() !== 'running') {
+      audioDiag('lifecycle', 'playing audio integrity repair — context not running', snapshot)
+      this.scheduleContextInterruptRecovery(`playing-integrity:${reason}`)
+      repairedSomething = true
+    }
+
+    if (this.isPlayingFinalOutputSilent()) {
+      audioDiag('lifecycle', 'playing audio integrity repair — final output silent', snapshot)
+      this.repairPlayingFinalOutputIfSilent()
+      repairedSomething = true
+    }
+
+    if (this.isPlayingTransitionGroupGainStuck()) {
+      audioDiag('lifecycle', 'playing audio integrity repair — transition output silent', snapshot)
+      this.repairPlayingTransitionOutputIfSilent()
+      repairedSomething = true
+    }
+
+    if (!repairedSomething) {
+      return true
+    }
+
+    await new Promise((resolve) => window.setTimeout(resolve, 95))
+
+    const repairSnapshot = this.getPlayingAudioIntegritySnapshot(reason, { phase: 'after-repair' })
+    audioDiag('lifecycle', 'playing audio integrity repair check', repairSnapshot)
+
+    if (this.isPlayingAudioIntegrityStillBroken()) {
+      this.forcePlayingAudioIntegrityHonestStop(reason, repairSnapshot)
+      return false
+    }
+
+    return true
   }
 
   // After a lock/emergency interruption the old Tone/WebAudio context is poisoned (stays
