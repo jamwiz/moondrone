@@ -19,7 +19,8 @@ import { InfoModal } from './InfoModal'
 import { useAppLifecycle } from './useAppLifecycle'
 import { getMoonStageVisualStyle } from './moonVisuals'
 import { getMoonArtworkSrc } from './moonArtwork'
-import { audioDiag } from './audioDiagnostics'
+import { audioDiag, AUDIO_DIAG } from './audioDiagnostics'
+import { AudioDebugPanel } from './AudioDebugPanel'
 import { addNativeAudioSessionListeners, configureNativePlaybackSession, forceNextNativePlaybackConfigure, isNativePlaybackActive } from './nativeAudioSession'
 import { ensurePrimerPlaying, getPrimerDebugState, isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
 import { markUserAudioAction } from './audioActivity'
@@ -91,7 +92,7 @@ const FIXED_REVERB_PERCENT = 20
 // is already fresh AND the (freshly rebuilt) AudioContext is already running. Isolates whether the
 // Play-after-return click comes from the media-primer / AVAudioSession reactivation vs the drone
 // graph. Normal first-launch and non-post-lock starts always use the primer.
-const SKIP_MEDIA_PRIMER_ON_POST_LOCK_START = true
+const SKIP_MEDIA_PRIMER_ON_POST_LOCK_START = false
 const ATMOSPHERE_STORAGE_KEY = 'moondrone.atmosphere'
 // Mood = slow motion/behavior layer for non-binaural moons. Persisted per session.
 const MOOD_STORAGE_KEY = 'moondrone.mood'
@@ -470,6 +471,15 @@ function App() {
       }
 
       applyBinauralBeatToEngine()
+
+      if (postLockPlay) {
+        droneEngine.logPostBackgroundPlayOutputCheck('before-start', {
+          audioAlreadyLive,
+          requireColdRebuild,
+          primerSkippedForDiagnostic,
+        })
+      }
+
       await droneEngine.start(
         selectedKey,
         toEngineVolume(volume),
@@ -506,6 +516,11 @@ function App() {
       // Confirmed stable — clear all forced/cold flags.
       droneEngine.clearForegroundStartupFlags()
       if (postLockPlay) {
+        droneEngine.logPostBackgroundPlayOutputCheck('after-startup-success', {
+          audioAlreadyLive,
+          requireColdRebuild,
+          primerSkippedForDiagnostic,
+        })
         audioDiag('drone', 'post-lock startup success — UI playing committed', {
           contextState: droneEngine.getContextState?.(),
         })
@@ -1350,6 +1365,8 @@ function App() {
           <DevOutputMeter />
         </Suspense>
       ) : null}
+
+      {AUDIO_DIAG ? <AudioDebugPanel uiIsMetronomePlaying={isMetronomePlaying} /> : null}
     </main>
   )
 }
