@@ -511,16 +511,20 @@ function App() {
           })
           throw new Error('Foreground startup not stable — context interrupted after lock')
         }
+
+        const outputOk = await droneEngine.logPostBackgroundPlayOutputCheck('after-startup-success', {
+          audioAlreadyLive,
+          requireColdRebuild,
+          primerSkippedForDiagnostic,
+        })
+        if (!outputOk) {
+          throw new Error('Post-background startup output still silent after repair')
+        }
       }
 
       // Confirmed stable — clear all forced/cold flags.
       droneEngine.clearForegroundStartupFlags()
       if (postLockPlay) {
-        droneEngine.logPostBackgroundPlayOutputCheck('after-startup-success', {
-          audioAlreadyLive,
-          requireColdRebuild,
-          primerSkippedForDiagnostic,
-        })
         audioDiag('drone', 'post-lock startup success — UI playing committed', {
           contextState: droneEngine.getContextState?.(),
         })

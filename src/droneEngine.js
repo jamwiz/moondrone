@@ -12951,6 +12951,31 @@ export class DroneEngine {
       if (this.startupMicroFadeGeneration !== generation || this.startupMicroFadeState !== 'begin') {
         return
       }
+
+      if (this.masterFinalOutputTrim) {
+        try {
+          const trimDbBefore = this.masterFinalOutputTrim.volume.value
+          if (trimDbBefore <= -59.5) {
+            const correctNow = this.getToneNowSafe()
+            const CORRECT_RAMP = 0.08
+            this.masterFinalOutputTrim.mute = false
+            this.masterFinalOutputTrim.volume.cancelScheduledValues(correctNow)
+            this.masterFinalOutputTrim.volume.setValueAtTime(trimDbBefore, correctNow)
+            this.masterFinalOutputTrim.volume.linearRampToValueAtTime(targetDb, correctNow + CORRECT_RAMP)
+            audioDiag('drone-engine', 'post-lock startup micro-fade final trim corrected', {
+              reason,
+              postLock,
+              contextState: this.getContextState(),
+              generation,
+              targetGainDb: targetDb,
+              trimDbBefore: Number(trimDbBefore.toFixed(2)),
+            })
+          }
+        } catch {
+          // Node may be mid-teardown; ignore.
+        }
+      }
+
       this.startupMicroFadeState = 'complete'
       audioDiag('drone-engine', 'post-lock startup micro-fade complete', {
         reason,
@@ -13179,26 +13204,99 @@ export class DroneEngine {
     return false
   }
 
-  logPostBackgroundPlayOutputCheck(phase, extra = {}) {
+  repairPostBackgroundOutputIfSilent(reason = 'after-startup-success') {
+    const RAMP_SECONDS = 0.08
+    const now = this.getToneNowSafe()
+    const targetDb = this.getToneLabFinalOutputTrimDb()
+
+    audioDiag('lifecycle', 'post-background output stuck silent — repairing final trim', {
+      reason,
+      ...this.getPostBackgroundOutputDiagnostics(),
+    })
+
+    if (this.masterFinalOutputTrim) {
+      try {
+        this.masterFinalOutputTrim.mute = false
+        this.masterFinalOutputTrim.volume.cancelScheduledValues(now)
+        let startDb = -60
+        try {
+          startDb = this.masterFinalOutputTrim.volume.value <= -59.5
+            ? -60
+            : this.masterFinalOutputTrim.volume.value
+        } catch {
+          startDb = -60
+        }
+        this.masterFinalOutputTrim.volume.setValueAtTime(startDb, now)
+        this.masterFinalOutputTrim.volume.linearRampToValueAtTime(targetDb, now + RAMP_SECONDS)
+      } catch {
+        return false
+      }
+    }
+
+    if (this.reverb?.wet) {
+      try {
+        const targetWet = this.getReverbWet()
+        if (targetWet > 0) {
+          this.reverb.wet.cancelScheduledValues(now)
+          const currentWet = this.reverb.wet.value <= 0.0001 ? 0 : this.reverb.wet.value
+          this.reverb.wet.setValueAtTime(currentWet, now)
+          if (Math.abs(currentWet - targetWet) > 0.0001) {
+            this.reverb.wet.linearRampToValueAtTime(targetWet, now + RAMP_SECONDS)
+          }
+        }
+      } catch {
+        // Reverb may be mid-build/teardown; ignore.
+      }
+    }
+
+    try {
+      this.applyVolume(RAMP_SECONDS)
+    } catch {
+      // Volume nodes may be mid-build; ignore.
+    }
+
+    return true
+  }
+
+  async logPostBackgroundPlayOutputCheck(phase, extra = {}) {
     const snapshot = this.getPostBackgroundOutputDiagnostics({ phase, ...extra })
     audioDiag('lifecycle', `post-background Play output check — ${phase}`, snapshot)
 
     if (phase === 'after-startup-success') {
+      if (!this.isPostBackgroundOutputStillMuted({ requireAudibleTrim: true })) {
+        audioDiag('lifecycle', 'post-background audio output restore check — success', snapshot)
+        return true
+      }
+
+      audioDiag('lifecycle', 'post-background startup succeeded but output still muted', {
+        finalOutputMuted: snapshot.finalOutputMuted,
+        finalOutputTrimDb: snapshot.finalOutputTrimDb,
+        reverbWet: snapshot.reverbWet,
+        backgroundKillSwitchHardMutePending: snapshot.backgroundKillSwitchHardMutePending,
+        lifecycleGracefulStopPending: snapshot.lifecycleGracefulStopPending,
+        contextState: snapshot.contextState,
+        nativePlaybackActive: snapshot.nativePlaybackActive,
+        ...snapshot,
+      })
+
+      this.repairPostBackgroundOutputIfSilent('after-startup-success')
+
+      // Let the repair ramp land before re-checking (scheduling-only repair, no Play delay).
+      await new Promise((resolve) => window.setTimeout(resolve, 95))
+
+      const repairSnapshot = this.getPostBackgroundOutputDiagnostics({
+        phase: 'after-repair',
+        ...extra,
+      })
+      audioDiag('lifecycle', 'post-background output repair check', repairSnapshot)
+
       if (this.isPostBackgroundOutputStillMuted({ requireAudibleTrim: true })) {
-        audioDiag('lifecycle', 'post-background startup succeeded but output still muted', {
-          finalOutputMuted: snapshot.finalOutputMuted,
-          finalOutputTrimDb: snapshot.finalOutputTrimDb,
-          reverbWet: snapshot.reverbWet,
-          backgroundKillSwitchHardMutePending: snapshot.backgroundKillSwitchHardMutePending,
-          lifecycleGracefulStopPending: snapshot.lifecycleGracefulStopPending,
-          contextState: snapshot.contextState,
-          nativePlaybackActive: snapshot.nativePlaybackActive,
-          ...snapshot,
-        })
+        audioDiag('lifecycle', 'post-background output repair failed — aborting startup', repairSnapshot)
         return false
       }
 
-      audioDiag('lifecycle', 'post-background audio output restore check — success', snapshot)
+      audioDiag('lifecycle', 'post-background output repair succeeded', repairSnapshot)
+      audioDiag('lifecycle', 'post-background audio output restore check — success', repairSnapshot)
       return true
     }
 
