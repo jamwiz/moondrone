@@ -236,54 +236,130 @@ public class MoondroneAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 // MainViewController.capacitorDidLoad(), remove the UIBackgroundModes `audio`
 // key from Info.plist, and delete src/nativeDroneExperiment.js.
 
-/// Continuous native drone: three summed sine partials (root + fifth + octave)
-/// rendered in real time. Kept intentionally simple for the POC.
+/// Slightly-more-Moondrone-like native drone. Renders a summed set of sine partials
+/// (root + fifth + octave preset by default) in real time with click-free, one-pole
+/// smoothed parameters:
+///   • volume        — master gain 0…1
+///   • rootHz         — fundamental; partials track it as ratios so pitch glides smoothly
+///   • partials       — [(ratio, gain)] set, up to `maxPartials`
+///   • breath         — slow tremolo depth 0…1 (gentle amplitude "breathing")
+///   • intensity      — 0…1 upper-partial emphasis / brightness tilt
+///
+/// Thread model: the render callback is the ONLY writer of the `current*` smoothed
+/// state and phases. The main thread writes `target*` scalars (word-sized, benign race)
+/// and swaps the partial arrays under `paramLock`. The render callback copies the partial
+/// set into preallocated scratch under the lock once per buffer (no per-sample locking,
+/// no heap allocation on the audio thread).
 final class NativeDroneEngine {
+    struct Partial { var ratio: Double; var gain: Float }
+
     private let engine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode?
     private(set) var isRunning = false
 
     private let sampleRate: Double = 44100.0
-    private var phase0 = 0.0
-    private var phase1 = 0.0
-    private var phase2 = 0.0
+    private static let maxPartials = 8
 
-    // Master gain 0.0–1.0. Read on the audio render thread; benign to write from main.
-    var volume: Float = 0.2
+    // Partial set (guarded by paramLock — written on main, snapshotted on render thread).
+    private let paramLock = NSLock()
+    private var ratios = [Double](repeating: 0, count: maxPartials)
+    private var targetGains = [Float](repeating: 0, count: maxPartials)
+    private var activeCount = 0
 
-    private let rootHz = 110.0    // A2
-    private let fifthHz = 164.81  // ~E3
-    private let octaveHz = 220.0  // A3
+    // Render-thread-only state.
+    private var currentGains = [Float](repeating: 0, count: maxPartials)
+    private var phases = [Double](repeating: 0, count: maxPartials)
+    private var scratchRatios = [Double](repeating: 0, count: maxPartials)
+    private var scratchTargetGains = [Float](repeating: 0, count: maxPartials)
+    private var breathPhase = 0.0
 
-    func start() throws {
-        if isRunning { return }
+    // Smoothed scalar params: target* set on main, current* ramped on render thread.
+    private var targetRootHz = 110.0     // A2
+    private var currentRootHz = 110.0
+    private var targetVolume: Float = 0.0
+    private var currentVolume: Float = 0.0
+    private var targetBreath: Float = 0.0
+    private var currentBreath: Float = 0.0
+    private var targetIntensity: Float = 0.4
+    private var currentIntensity: Float = 0.4
+
+    // One-pole smoothing coefficients (per sample). ~35 ms gain/param, ~80 ms pitch glide.
+    private lazy var ampCoeff: Float = 1.0 - exp(-1.0 / Float(0.035 * sampleRate))
+    private lazy var freqCoeff = 1.0 - exp(-1.0 / (0.080 * sampleRate))
+    private let breathRateHz = 0.12  // ~8 s breathing cycle
+
+    init() {
+        applyDefaultPreset()
+    }
+
+    /// Simple Moondrone-like preset: root + fifth + octave.
+    func applyDefaultPreset() {
+        setPartials([
+            Partial(ratio: 1.0, gain: 0.5),
+            Partial(ratio: 1.5, gain: 0.3),
+            Partial(ratio: 2.0, gain: 0.2),
+        ])
+    }
+
+    func start(volume: Float?) throws {
+        if isRunning {
+            if let volume = volume { setVolume(volume) }
+            return
+        }
 
         guard let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2) else {
             throw NSError(domain: "NativeDrone", code: 1,
                           userInfo: [NSLocalizedDescriptionKey: "could not create AVAudioFormat"])
         }
 
+        // Start silent and ramp up so there is no onset click.
+        currentVolume = 0.0
+        targetVolume = max(0.0, min(1.0, volume ?? 0.2))
+
         let twoPi = 2.0 * Double.pi
-        let inc0 = twoPi * rootHz / sampleRate
-        let inc1 = twoPi * fifthHz / sampleRate
-        let inc2 = twoPi * octaveHz / sampleRate
 
         let node = AVAudioSourceNode { [weak self] _, _, frameCount, audioBufferList -> OSStatus in
             guard let self = self else { return noErr }
             let ablPointer = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            let amp = self.volume
+
+            // Snapshot the partial set once per buffer (COW retain only; no deep copy).
+            self.paramLock.lock()
+            let count = self.activeCount
+            for i in 0..<count {
+                self.scratchRatios[i] = self.ratios[i]
+                self.scratchTargetGains[i] = self.targetGains[i]
+            }
+            self.paramLock.unlock()
+
+            let ampCoeff = self.ampCoeff
+            let freqCoeff = self.freqCoeff
+            let breathInc = twoPi * self.breathRateHz / self.sampleRate
 
             for frame in 0..<Int(frameCount) {
-                let value = sin(self.phase0) * 0.5 + sin(self.phase1) * 0.3 + sin(self.phase2) * 0.2
-                let sample = Float(value) * amp
+                // Smooth scalar params toward targets (click-free).
+                self.currentVolume += (self.targetVolume - self.currentVolume) * ampCoeff
+                self.currentBreath += (self.targetBreath - self.currentBreath) * ampCoeff
+                self.currentIntensity += (self.targetIntensity - self.currentIntensity) * ampCoeff
+                self.currentRootHz += (self.targetRootHz - self.currentRootHz) * freqCoeff
 
-                self.phase0 += inc0
-                self.phase1 += inc1
-                self.phase2 += inc2
-                if self.phase0 > twoPi { self.phase0 -= twoPi }
-                if self.phase1 > twoPi { self.phase1 -= twoPi }
-                if self.phase2 > twoPi { self.phase2 -= twoPi }
+                // Gentle breathing tremolo: at full depth the level dips ~55%.
+                self.breathPhase += breathInc
+                if self.breathPhase > twoPi { self.breathPhase -= twoPi }
+                let breathLfo = 0.5 - 0.5 * cos(self.breathPhase)
+                let ampMod = 1.0 - Double(self.currentBreath) * 0.55 * breathLfo
 
+                var mix = 0.0
+                for i in 0..<count {
+                    self.currentGains[i] += (self.scratchTargetGains[i] - self.currentGains[i]) * ampCoeff
+                    let inc = twoPi * (self.currentRootHz * self.scratchRatios[i]) / self.sampleRate
+                    self.phases[i] += inc
+                    if self.phases[i] > twoPi { self.phases[i] -= twoPi }
+                    // Intensity tilt: upper partials (ratio > 1) fade in with brightness.
+                    let tilt = self.scratchRatios[i] <= 1.0 ? 1.0 : Double(0.35 + 0.65 * self.currentIntensity)
+                    mix += sin(self.phases[i]) * Double(self.currentGains[i]) * tilt
+                }
+
+                let sample = Float(mix * ampMod) * self.currentVolume
                 for buffer in ablPointer {
                     guard let dst = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
                     dst[frame] = sample
@@ -299,22 +375,74 @@ final class NativeDroneEngine {
         engine.prepare()
         try engine.start()
         isRunning = true
-        print("⚡️ [NativeDrone] engine started (volume \(volume))")
+        print("⚡️ [NativeDrone] engine started (targetVolume \(targetVolume))")
     }
 
+    /// Ramp volume to 0, then tear the engine down so there is no stop click.
     func stop() {
         guard isRunning else { return }
-        engine.stop()
-        if let node = sourceNode {
-            engine.detach(node)
-        }
+        targetVolume = 0.0
+        let node = sourceNode
         sourceNode = nil
         isRunning = false
-        print("⚡️ [NativeDrone] engine stopped")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+            guard let self = self else { return }
+            self.engine.stop()
+            if let node = node { self.engine.detach(node) }
+            print("⚡️ [NativeDrone] engine stopped")
+        }
     }
 
     func setVolume(_ value: Float) {
-        volume = max(0.0, min(1.0, value))
+        targetVolume = max(0.0, min(1.0, value))
+    }
+
+    func setFrequency(_ hz: Double) {
+        targetRootHz = max(20.0, min(2000.0, hz))
+    }
+
+    func setBreath(_ value: Float) {
+        targetBreath = max(0.0, min(1.0, value))
+    }
+
+    func setIntensity(_ value: Float) {
+        targetIntensity = max(0.0, min(1.0, value))
+    }
+
+    /// Replace the partial set. Gains ramp from their current values (click-free); extra
+    /// partials beyond `maxPartials` are ignored.
+    func setPartials(_ partials: [Partial]) {
+        let count = min(partials.count, NativeDroneEngine.maxPartials)
+        paramLock.lock()
+        for i in 0..<count {
+            ratios[i] = partials[i].ratio
+            targetGains[i] = max(0.0, min(1.0, partials[i].gain))
+        }
+        // Fade unused slots to silence rather than dropping them abruptly.
+        if count < activeCount {
+            for i in count..<activeCount { targetGains[i] = 0.0 }
+        }
+        activeCount = max(count, activeCount)
+        // Once faded, shrink the active range on the next set; keep summing the fading tails now.
+        paramLock.unlock()
+    }
+
+    func snapshot() -> [String: Any] {
+        paramLock.lock()
+        let count = activeCount
+        var partialInfo: [[String: Any]] = []
+        for i in 0..<count {
+            partialInfo.append(["ratio": ratios[i], "gain": targetGains[i]])
+        }
+        paramLock.unlock()
+        return [
+            "isRunning": isRunning,
+            "rootHz": targetRootHz,
+            "volume": targetVolume,
+            "breath": targetBreath,
+            "intensity": targetIntensity,
+            "partials": partialInfo,
+        ]
     }
 }
 
@@ -326,7 +454,11 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "startNativeDrone", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopNativeDrone", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "setNativeDroneVolume", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "setNativeDroneVolume", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setNativeDroneFrequency", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setNativeDronePartials", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setNativeDroneBreath", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setNativeDroneIntensity", returnType: CAPPluginReturnPromise)
     ]
 
     private let drone = NativeDroneEngine()
@@ -338,14 +470,12 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
         let requestedVolume = call.getDouble("volume")
 
         DispatchQueue.main.async {
-            if let requestedVolume = requestedVolume {
-                self.drone.setVolume(Float(requestedVolume))
-            }
             do {
-                try self.drone.start()
+                try self.drone.start(volume: requestedVolume.map { Float($0) })
                 var result = sessionState
                 result["droneRunning"] = true
                 result["engine"] = "AVAudioEngine+AVAudioSourceNode"
+                result["state"] = self.drone.snapshot()
                 call.resolve(result)
             } catch {
                 print("⚡️ [NativeDrone] startNativeDrone FAILED:", error)
@@ -368,8 +498,59 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
             return
         }
         let clamped = max(0.0, min(1.0, value))
-        self.drone.setVolume(Float(clamped))
+        drone.setVolume(Float(clamped))
         call.resolve(["volume": clamped])
+    }
+
+    @objc func setNativeDroneFrequency(_ call: CAPPluginCall) {
+        guard let hz = call.getDouble("rootHz") else {
+            call.reject("setNativeDroneFrequency requires a numeric 'rootHz'")
+            return
+        }
+        drone.setFrequency(hz)
+        call.resolve(["rootHz": hz])
+    }
+
+    @objc func setNativeDronePartials(_ call: CAPPluginCall) {
+        guard let raw = call.getArray("partials") else {
+            call.reject("setNativeDronePartials requires an array 'partials' of { ratio, gain }")
+            return
+        }
+        var partials: [NativeDroneEngine.Partial] = []
+        for entry in raw {
+            guard let dict = entry as? [String: Any],
+                  let ratio = (dict["ratio"] as? NSNumber)?.doubleValue,
+                  let gain = (dict["gain"] as? NSNumber)?.doubleValue else {
+                continue
+            }
+            partials.append(NativeDroneEngine.Partial(ratio: ratio, gain: Float(gain)))
+        }
+        if partials.isEmpty {
+            call.reject("setNativeDronePartials: no valid { ratio, gain } entries")
+            return
+        }
+        drone.setPartials(partials)
+        call.resolve(["partialCount": partials.count])
+    }
+
+    @objc func setNativeDroneBreath(_ call: CAPPluginCall) {
+        guard let value = call.getDouble("value") else {
+            call.reject("setNativeDroneBreath requires a numeric 'value' (0.0–1.0)")
+            return
+        }
+        let clamped = max(0.0, min(1.0, value))
+        drone.setBreath(Float(clamped))
+        call.resolve(["breath": clamped])
+    }
+
+    @objc func setNativeDroneIntensity(_ call: CAPPluginCall) {
+        guard let value = call.getDouble("value") else {
+            call.reject("setNativeDroneIntensity requires a numeric 'value' (0.0–1.0)")
+            return
+        }
+        let clamped = max(0.0, min(1.0, value))
+        drone.setIntensity(Float(clamped))
+        call.resolve(["intensity": clamped])
     }
 }
 // =============================================================================

@@ -13,7 +13,15 @@ import {
   testNativePlaybackBeep,
 } from './nativeAudioSession'
 import { ensurePrimerPlaying, getPrimerDebugState } from './iosMediaPrimer'
-import { setNativeDroneVolume, startNativeDrone, stopNativeDrone } from './nativeDroneExperiment'
+import {
+  setNativeDroneBreath,
+  setNativeDroneFrequency,
+  setNativeDroneIntensity,
+  setNativeDronePartials,
+  setNativeDroneVolume,
+  startNativeDrone,
+  stopNativeDrone,
+} from './nativeDroneExperiment'
 import './AudioDebugPanel.css'
 
 function formatJson(value) {
@@ -378,6 +386,19 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
     refresh()
   }
 
+  async function handleNativeDroneParam(label, fn, arg, event) {
+    event.preventDefault()
+    event.stopPropagation()
+    audioDiag('debug-panel', `NATIVE DRONE ${label} pressed`, { arg })
+    try {
+      const result = await fn(arg)
+      setNativeDroneStatus((prev) => ({ ...(prev ?? {}), ...result, action: label }))
+    } catch (error) {
+      setNativeDroneStatus({ action: label, error: error?.message ?? String(error) })
+    }
+    refresh()
+  }
+
   if (collapsed) {
     return (
       <button
@@ -579,6 +600,80 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
           onPointerDown={(event) => handleNativeDroneVolume(0.3, event)}
         >
           NATIVE DRONE VOL 0.3
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={(event) => handleNativeDroneParam('freq A2', setNativeDroneFrequency, 110, event)}
+        >
+          NATIVE DRONE FREQ A2 (110)
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={(event) => handleNativeDroneParam('freq D3', setNativeDroneFrequency, 146.83, event)}
+        >
+          NATIVE DRONE FREQ D3 (146.8)
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={(event) => handleNativeDroneParam('breath 0', setNativeDroneBreath, 0, event)}
+        >
+          NATIVE DRONE BREATH 0
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={(event) => handleNativeDroneParam('breath 0.7', setNativeDroneBreath, 0.7, event)}
+        >
+          NATIVE DRONE BREATH 0.7
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={(event) => handleNativeDroneParam('intensity 0.2', setNativeDroneIntensity, 0.2, event)}
+        >
+          NATIVE DRONE INTENSITY 0.2
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={(event) => handleNativeDroneParam('intensity 0.95', setNativeDroneIntensity, 0.95, event)}
+        >
+          NATIVE DRONE INTENSITY 0.95
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={(event) => handleNativeDroneParam('preset R+5+8', setNativeDronePartials, undefined, event)}
+        >
+          NATIVE DRONE PRESET (R+5+8)
+        </button>
+        <button
+          type="button"
+          className="audio-debug-action"
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={(event) =>
+            handleNativeDroneParam(
+              'partials root+oct',
+              setNativeDronePartials,
+              [
+                { ratio: 1, gain: 0.6 },
+                { ratio: 2, gain: 0.25 },
+              ],
+              event,
+            )
+          }
+        >
+          NATIVE DRONE PARTIALS (ROOT+OCT)
         </button>
       </div>
 
