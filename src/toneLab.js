@@ -124,12 +124,12 @@ export const TONE_LAB_TUNING = {
     // High-pass on the full drone bus. Cuts sub rumble and mud.
     // Range: 20–180 Hz. Lower = more bass; higher = tighter/cleaner low end.
     // Safe default: 35 (gentle, nearly transparent).
-    lowCutHz: 105,
+    lowCutHz: 85,
 
     // Low-pass on the full drone bus. Rolls off brightness/air.
     // Range: 2500–12000 Hz. Lower = darker; higher (12000) = most open.
     // Safe default: 12000 (minimal rolloff — matches pre-Tone-Lab openness).
-    highCutHz: 11500,
+    highCutHz: 12000,
 
     // Broad peaking EQ around 200–500 Hz (center ~320 Hz).
     // Negative = less warmth/mud; positive = fuller body.
@@ -137,18 +137,18 @@ export const TONE_LAB_TUNING = {
     // Global clarity lift (Jun 2026): eased low-mid blanket + presence + air so car/
     // phone playback reads brighter without harshness. Still negative in the presence
     // region — warm/soft character preserved.
-    lowMidGainDb: -8.5,
-    lowMidFrequencyHz: 380,
-    lowMidQ: 0.75,
+    lowMidGainDb: -25,
+    lowMidFrequencyHz: 320,
+    lowMidQ: 0.8,
 
     // Broad phone / small-speaker presence band (~1.2–2 kHz). Independent from
     // highMidGainDb (harshness / upper-mid bite). Helps the drone read on iPhone,
     // car, and small speakers without simply making it brighter.
     // Positive = more projection / forwardness; negative = softer / more recessed.
     // Range: -3 to +3 dB. Safe default: 0 (transparent).
-    speakerPresenceGainDb: -4.5,
-    speakerPresenceFrequencyHz: 850,
-    speakerPresenceQ: 0.85,
+    speakerPresenceGainDb: -20,
+    speakerPresenceFrequencyHz: 520,
+    speakerPresenceQ: 0.9,
 
     // Broad peaking EQ around 2–3 kHz (center ~2500 Hz) — the presence / harshness /
     // nasal / digital-edge / upper-harmonic-bite region. Targets fatigue from
@@ -157,13 +157,13 @@ export const TONE_LAB_TUNING = {
     // overtone articulation.
     // Range: -6 to +3 dB. Safe default: 0 (neutral).
     // Examples: -2 dB = smoother; -4 dB = very soft / meditation-oriented; +1 dB = more presence.
-    highMidGainDb: -2.5,
-    highMidFrequencyHz: 2300,
-    highMidQ: 0.9,
+    highMidGainDb: 20,
+    highMidFrequencyHz: 1750,
+    highMidQ: 0.45,
 
     // High shelf “air” band (~4.2 kHz). Added on top of AIR_SHIMMER air shelf.
     // Range: -2 to +3 dB. Safe default: 0 (no extra air from Tone Lab).
-    airGainDb: 6,
+    airGainDb: 11,
     airFrequencyHz: 4200,
     airQ: 0.45,
 
@@ -171,7 +171,7 @@ export const TONE_LAB_TUNING = {
     // Controls shimmer, gloss, whisp, and top-end edge — not general openness.
     // Positive = more sparkle and top-end openness; negative = softer, less hiss/whisp.
     // Range: -3 to +3 dB. Safe default: 0 (transparent).
-    upperAirGainDb: 2,
+    upperAirGainDb: 5,
     upperAirFrequencyHz: 7600,
     upperAirQ: 0.55,
   },
@@ -192,11 +192,11 @@ export const TONE_LAB_TUNING = {
     // Global volume for the mood harmonic layer (True Orbit pair, per-voice orbit
     // cents, harmonic bloom redistribution, Super dual beats, bloom EQ level).
     // Range: 0–1.5. 0 = off; 1 = current behavior.
-    gain: 0.25,
+    gain: 0.3,
 
     // Tone control for the phase harmonic layer — bloom shelf swing and orbit shimmer.
     // Range: 0–1.5. 0 = darker/smoother; 1 = current; >1 = brighter (cautious).
-    brightness: 1.4,
+    brightness: 1.5,
 
     // How much the phase harmonic layer moves (orbit sweep, bloom, eclipse, orbit cents).
     // Range: 0–1.5. 0 = steady; 1 = current motion.
@@ -257,12 +257,12 @@ export const TONE_LAB_TUNING = {
     // Compressor strength macro. 1 = current MASTER_TUNING glue level.
     // Range: 0–1.5. Lower = gentler/less squash; higher = more glue (watch pumping).
     // Maps to threshold, ratio, and makeup — not a blind crush.
-    compressorAmount: 1.35,
+    compressorAmount: 1.4,
 
     // Final post-limiter output trim. Use mainly for attenuation after mastering.
     // Positive values can exceed the limiter ceiling and may clip device output.
     // Calibrated 2026 via dev output meter (+3 dB vs prior 0 dB default).
-    finalOutputTrimDb: 3,
+    finalOutputTrimDb: 1,
   },
 }
 
