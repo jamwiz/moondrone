@@ -504,7 +504,7 @@ final class NativeDroneEngine {
 
         // Start silent and ramp up so there is no onset click; reset time-varying state.
         currentVolume = 0.0
-        targetVolume = max(0.0, min(1.0, volume ?? 0.2))
+        targetVolume = clamp01(Double(volume ?? 0.2))
         breathElapsed = 0.0
         lpState = 0.0; dcPrevIn = 0.0; dcPrevOut = 0.0
         noiseHp = 0.0; noiseLp = 0.0
@@ -710,10 +710,14 @@ final class NativeDroneEngine {
         }
     }
 
-    func setVolume(_ value: Float) { targetVolume = max(0.0, min(1.0, value)) }
+    private func clamp01(_ value: Double) -> Double {
+        return max(0.0, min(1.0, value))
+    }
+
+    func setVolume(_ value: Float) { targetVolume = clamp01(Double(value)) }
     func setFrequency(_ hz: Double) { targetRootHz = max(20.0, min(4000.0, hz)) }
-    func setBreath(_ value: Float) { targetBreath = max(0.0, min(1.0, value)) }
-    func setIntensity(_ value: Float) { targetIntensity = max(0.0, min(1.0, value)) }
+    func setBreath(_ value: Float) { targetBreath = clamp01(Double(value)) }
+    func setIntensity(_ value: Float) { targetIntensity = clamp01(Double(value)) }
     func setBinauralBeat(_ hz: Double) { targetBinauralBeatHz = max(0.0, min(60.0, hz)) }
 
     /// Select a Moondrone moon preset (voice model mode).
