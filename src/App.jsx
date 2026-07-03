@@ -42,6 +42,9 @@ import {
   nativeModeStopMetronome,
   setNativeModeEnabled,
 } from './nativeModeBridge'
+// Native Tone Lab (organ-timbre experiment). Side-effect import registers the
+// window.moondroneNativeToneLab console API + pushes persisted settings to the native engine.
+import { pushNativeToneLab } from './nativeToneLab'
 import { ensurePrimerPlaying, getPrimerDebugState, isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
 import { markUserAudioAction } from './audioActivity'
 import {
@@ -437,6 +440,9 @@ function App() {
     // Tone.js is untouched; when Native Mode is off this branch never runs.
     if (isNativeModeEnabled()) {
       try {
+        // Push the persisted Native Tone Lab (organ) settings first so the engine snaps to the
+        // requested timbre on cold start (fire-and-forget; the Swift side smooths live changes).
+        pushNativeToneLab()
         await nativeModePlay({
           key: selectedKey,
           octave: selectedOctave,
@@ -840,12 +846,17 @@ function App() {
   function handleOctaveChange(octave) {
     setSelectedOctave(octave)
 
-    // NATIVE MODE (temp experiment): update native register + recompute root frequency.
+    // NATIVE MODE (temp experiment): a register change is ONE atomic native transition.
+    // nativeModeSetFrequency already sends the new register AND the new rootHz, and the Swift
+    // engine pairs them into a single "register" crossfade (setRegister flags registerChangePending;
+    // the following changeNote consumes it → registerXfade timing). So when playing we call ONLY
+    // nativeModeSetFrequency — calling nativeModeSetRegister first too was a redundant, non-atomic
+    // double send. When stopped we just persist the register so the next Play starts correctly.
     if (isNativeModeEnabled()) {
-      // Send register even when stopped so the next Play starts in the right register.
-      nativeModeSetRegister(octave)
       if (isPlaying) {
         nativeModeSetFrequency(selectedKey, octave, referenceA)
+      } else {
+        nativeModeSetRegister(octave)
       }
       return
     }

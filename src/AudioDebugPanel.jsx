@@ -22,6 +22,13 @@ import {
   startNativeDrone,
   stopNativeDrone,
 } from './nativeDroneExperiment'
+import {
+  applyNativeToneLabPreset,
+  getNativeToneLabSettings,
+  resetNativeToneLabSettings,
+  setNativeToneLabSettings,
+  subscribeNativeToneLab,
+} from './nativeToneLab'
 import './AudioDebugPanel.css'
 
 function formatJson(value) {
@@ -53,6 +60,115 @@ function getEngineSnapshot() {
     metronomeChainReady: diag.metronomeChainReady ?? 'unknown',
     metronomeChainReadyTruthy: diag.metronomeChainReadyTruthy ?? false,
   }
+}
+
+function formatSliderValue(value, isDb) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return isDb ? '0.0' : '0.00'
+  return isDb ? n.toFixed(1) : n.toFixed(2)
+}
+
+function ToneLabSlider({ label, value, onChange, min = 0, max = 1, step = 0.01, isDb = false }) {
+  return (
+    <label className="audio-debug-slider-row">
+      <div className="audio-debug-slider-header">
+        <span className="audio-debug-slider-label">{label}</span>
+        <span className="audio-debug-slider-value">{formatSliderValue(value, isDb)}</span>
+      </div>
+      <input
+        type="range"
+        className="audio-debug-slider"
+        min={min}
+        max={max}
+        step={step}
+        value={Number(value)}
+        onChange={(event) => onChange(Number(event.target.value))}
+        onPointerDown={(event) => event.stopPropagation()}
+      />
+    </label>
+  )
+}
+
+function NativeToneLabControls() {
+  const [settings, setSettings] = useState(getNativeToneLabSettings)
+
+  useEffect(() => subscribeNativeToneLab(setSettings), [])
+
+  const update = useCallback((key, value) => {
+    setSettings(setNativeToneLabSettings({ [key]: value }))
+  }, [])
+
+  const applyPreset = useCallback((name) => {
+    setSettings(applyNativeToneLabPreset(name))
+  }, [])
+
+  const handleReset = useCallback(() => {
+    setSettings(resetNativeToneLabSettings())
+  }, [])
+
+  return (
+    <details className="audio-debug-details" open>
+      <summary className="audio-debug-details-summary">Native Tone Lab</summary>
+      <p className="audio-debug-hint">
+        Live organ-timbre experiment (Native Mode only). Changes persist in localStorage.
+      </p>
+
+      <div className="audio-debug-preset-row">
+        <button type="button" className="audio-debug-preset-btn" onClick={handleReset}>
+          Reset
+        </button>
+        <button type="button" className="audio-debug-preset-btn" onClick={() => applyPreset('off')}>
+          Off
+        </button>
+        <button type="button" className="audio-debug-preset-btn" onClick={() => applyPreset('titanOrgan')}>
+          Titan Organ
+        </button>
+        <button type="button" className="audio-debug-preset-btn" onClick={() => applyPreset('titanSoft')}>
+          Titan Soft
+        </button>
+        <button type="button" className="audio-debug-preset-btn" onClick={() => applyPreset('cosmicGlow')}>
+          Cosmic Glow
+        </button>
+      </div>
+
+      <details className="audio-debug-details audio-debug-details-nested" open>
+        <summary className="audio-debug-details-summary">Global Organ Tone</summary>
+        <ToneLabSlider label="Organ amount" value={settings.organToneAmount} onChange={(v) => update('organToneAmount', v)} />
+        <ToneLabSlider label="Organ brightness" value={settings.organToneBrightness} onChange={(v) => update('organToneBrightness', v)} />
+        <ToneLabSlider label="Organ blend" value={settings.organToneBlend} onChange={(v) => update('organToneBlend', v)} />
+        <ToneLabSlider label="Triangle body" value={settings.triangleBody} onChange={(v) => update('triangleBody', v)} />
+        <ToneLabSlider label="Saw body" value={settings.sawBody} onChange={(v) => update('sawBody', v)} />
+        <ToneLabSlider label="Formant body" value={settings.formantBody} onChange={(v) => update('formantBody', v)} />
+        <ToneLabSlider
+          label="Output trim (dB)"
+          value={settings.outputTrimDb}
+          onChange={(v) => update('outputTrimDb', v)}
+          min={-6}
+          max={6}
+          step={0.1}
+          isDb
+        />
+      </details>
+
+      <details className="audio-debug-details audio-debug-details-nested" open>
+        <summary className="audio-debug-details-summary">Moon Amounts</summary>
+        <ToneLabSlider label="Pure organ" value={settings.pureOrgan} onChange={(v) => update('pureOrgan', v)} />
+        <ToneLabSlider label="Shruti organ" value={settings.shrutiOrgan} onChange={(v) => update('shrutiOrgan', v)} />
+        <ToneLabSlider label="Strings organ" value={settings.stringsOrgan} onChange={(v) => update('stringsOrgan', v)} />
+        <ToneLabSlider label="Cosmos organ" value={settings.cosmosOrgan} onChange={(v) => update('cosmosOrgan', v)} />
+        <ToneLabSlider label="Binaural organ" value={settings.binauralOrgan} onChange={(v) => update('binauralOrgan', v)} />
+      </details>
+
+      <details className="audio-debug-details audio-debug-details-nested">
+        <summary className="audio-debug-details-summary">Moon Trims (dB)</summary>
+        <ToneLabSlider label="Pure trim" value={settings.pureTrimDb} onChange={(v) => update('pureTrimDb', v)} min={-6} max={6} step={0.1} isDb />
+        <ToneLabSlider label="Shruti trim" value={settings.shrutiTrimDb} onChange={(v) => update('shrutiTrimDb', v)} min={-6} max={6} step={0.1} isDb />
+        <ToneLabSlider label="Strings trim" value={settings.stringsTrimDb} onChange={(v) => update('stringsTrimDb', v)} min={-6} max={6} step={0.1} isDb />
+        <ToneLabSlider label="Cosmos trim" value={settings.cosmosTrimDb} onChange={(v) => update('cosmosTrimDb', v)} min={-6} max={6} step={0.1} isDb />
+        <ToneLabSlider label="Binaural trim" value={settings.binauralTrimDb} onChange={(v) => update('binauralTrimDb', v)} min={-6} max={6} step={0.1} isDb />
+      </details>
+    </details>
+  )
 }
 
 export function AudioDebugPanel({
@@ -96,11 +212,14 @@ export function AudioDebugPanel({
     nativeDebug.lastError?.looksUnimplemented === true
 
   async function handleCopyLog() {
+    const toneLab = getNativeToneLabSettings()
     const text = [
       '=== Moondrone iOS audio debug ===',
       `uiIsMetronomePlaying: ${uiIsMetronomePlaying}`,
+      `nativeModeEnabled: ${nativeModeEnabled}`,
       `engine: ${formatJson(engineSnapshot)}`,
       `native: ${formatJson(nativeDebug)}`,
+      `nativeToneLab: ${formatJson(toneLab)}`,
       `beep: ${formatJson(beepStatus)}`,
       `tapCounter: ${tapCounter}`,
       '',
@@ -217,10 +336,6 @@ export function AudioDebugPanel({
     refresh()
   }
 
-  // Proves whether asserting native .playback IMMEDIATELY BEFORE WebAudio (vs after) changes
-  // Silent Mode behavior. Native is called before AND after Tone.start; Tone.start is NOT awaited
-  // behind a blocking native call in a way that loses the gesture — native-before is fired first
-  // but Tone.start runs in the same handler tick right after.
   async function handleTestWebBeepNativePreset(event) {
     event.preventDefault()
     event.stopPropagation()
@@ -282,9 +397,6 @@ export function AudioDebugPanel({
     }
   }
 
-  // Full Silent-Mode workaround test: native .playback → hidden HTMLAudioElement primer →
-  // Tone.start → raw WebAudio beep → reassert native. If this beep is audible in Silent Mode but
-  // the plain web beep is not, the media primer is the fix.
   async function handleTestMediaPrimerWebBeep(event) {
     event.preventDefault()
     event.stopPropagation()
@@ -350,7 +462,6 @@ export function AudioDebugPanel({
     }
   }
 
-  // Native drone POC — isolated from the Tone.js engine and the normal Play button.
   async function handleStartNativeDrone(event) {
     event.preventDefault()
     event.stopPropagation()
@@ -489,224 +600,236 @@ export function AudioDebugPanel({
         </div>
       </div>
 
-      <div className="audio-debug-block">
-        <div className="audio-debug-label">Last native session result</div>
-        <pre className="audio-debug-pre">{formatJson(nativeDebug.lastResult)}</pre>
-      </div>
-
-      <div className="audio-debug-block">
-        <div className="audio-debug-label">Last native session error</div>
-        <pre className={`audio-debug-pre ${nativeDebug.lastError ? 'audio-debug-bad' : ''}`}>
-          {formatJson(nativeDebug.lastError)}
-        </pre>
-      </div>
-
-      {nativeTestMessage ? (
-        <p className={`audio-debug-banner ${nativeLooksBroken ? 'audio-debug-bad' : ''}`}>{nativeTestMessage}</p>
-      ) : null}
-
-      {beepStatus ? (
+      <details className="audio-debug-details">
+        <summary className="audio-debug-details-summary">Native session snapshot</summary>
         <div className="audio-debug-block">
-          <div className="audio-debug-label">Raw web beep test</div>
-          <pre className="audio-debug-pre">{formatJson(beepStatus)}</pre>
+          <div className="audio-debug-label">Last native session result</div>
+          <pre className="audio-debug-pre">{formatJson(nativeDebug.lastResult)}</pre>
         </div>
-      ) : null}
-
-      {nativeBeepStatus ? (
         <div className="audio-debug-block">
-          <div className="audio-debug-label">Native beep test (AVAudioEngine)</div>
-          <pre className={`audio-debug-pre ${nativeBeepStatus.error ? 'audio-debug-bad' : ''}`}>
-            {formatJson(nativeBeepStatus)}
+          <div className="audio-debug-label">Last native session error</div>
+          <pre className={`audio-debug-pre ${nativeDebug.lastError ? 'audio-debug-bad' : ''}`}>
+            {formatJson(nativeDebug.lastError)}
           </pre>
         </div>
-      ) : null}
+        {nativeTestMessage ? (
+          <p className={`audio-debug-banner ${nativeLooksBroken ? 'audio-debug-bad' : ''}`}>{nativeTestMessage}</p>
+        ) : null}
+      </details>
 
-      {webBeepPresetStatus ? (
-        <div className="audio-debug-block">
-          <div className="audio-debug-label">Web beep w/ native preset</div>
-          <pre className={`audio-debug-pre ${webBeepPresetStatus.error ? 'audio-debug-bad' : ''}`}>
-            {formatJson(webBeepPresetStatus)}
-          </pre>
+      {nativeModeEnabled ? (
+        <NativeToneLabControls />
+      ) : (
+        <p className="audio-debug-hint">Enable Native Mode to show Native Tone Lab sliders.</p>
+      )}
+
+      <details className="audio-debug-details">
+        <summary className="audio-debug-details-summary">Legacy tests</summary>
+        <p className="audio-debug-hint">Old WebAudio / POC buttons kept for troubleshooting only.</p>
+
+        {beepStatus ? (
+          <div className="audio-debug-block">
+            <div className="audio-debug-label">Raw web beep test</div>
+            <pre className="audio-debug-pre">{formatJson(beepStatus)}</pre>
+          </div>
+        ) : null}
+
+        {nativeBeepStatus ? (
+          <div className="audio-debug-block">
+            <div className="audio-debug-label">Native beep test (AVAudioEngine)</div>
+            <pre className={`audio-debug-pre ${nativeBeepStatus.error ? 'audio-debug-bad' : ''}`}>
+              {formatJson(nativeBeepStatus)}
+            </pre>
+          </div>
+        ) : null}
+
+        {webBeepPresetStatus ? (
+          <div className="audio-debug-block">
+            <div className="audio-debug-label">Web beep w/ native preset</div>
+            <pre className={`audio-debug-pre ${webBeepPresetStatus.error ? 'audio-debug-bad' : ''}`}>
+              {formatJson(webBeepPresetStatus)}
+            </pre>
+          </div>
+        ) : null}
+
+        {primerBeepStatus ? (
+          <div className="audio-debug-block">
+            <div className="audio-debug-label">Media primer + web beep</div>
+            <pre className={`audio-debug-pre ${primerBeepStatus.error ? 'audio-debug-bad' : ''}`}>
+              {formatJson(primerBeepStatus)}
+            </pre>
+          </div>
+        ) : null}
+
+        {nativeDroneStatus ? (
+          <div className="audio-debug-block">
+            <div className="audio-debug-label">Native drone POC (AVAudioSourceNode)</div>
+            <pre className={`audio-debug-pre ${nativeDroneStatus.error ? 'audio-debug-bad' : ''}`}>
+              {formatJson(nativeDroneStatus)}
+            </pre>
+          </div>
+        ) : null}
+
+        <div className="audio-debug-buttons">
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={handleTestTapVisible}
+          >
+            TEST TAP VISIBLE ({tapCounter})
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={handleTestNativeSession}
+          >
+            TEST NATIVE SESSION
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={handleTestRawBeep}
+          >
+            TEST RAW WEB AUDIO BEEP
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={handleTestNativeBeep}
+          >
+            TEST NATIVE BEEP
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={handleTestWebBeepNativePreset}
+          >
+            TEST WEB BEEP WITH NATIVE PRESET
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={handleTestMediaPrimerWebBeep}
+          >
+            TEST MEDIA PRIMER + WEB BEEP
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={handleStartNativeDrone}
+          >
+            START NATIVE DRONE (POC)
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={handleStopNativeDrone}
+          >
+            STOP NATIVE DRONE (POC)
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={(event) => handleNativeDroneVolume(0.05, event)}
+          >
+            NATIVE DRONE VOL 0.05
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={(event) => handleNativeDroneVolume(0.3, event)}
+          >
+            NATIVE DRONE VOL 0.3
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={(event) => handleNativeDroneParam('freq A2', setNativeDroneFrequency, 110, event)}
+          >
+            NATIVE DRONE FREQ A2 (110)
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={(event) => handleNativeDroneParam('freq D3', setNativeDroneFrequency, 146.83, event)}
+          >
+            NATIVE DRONE FREQ D3 (146.8)
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={(event) => handleNativeDroneParam('breath 0', setNativeDroneBreath, 0, event)}
+          >
+            NATIVE DRONE BREATH 0
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={(event) => handleNativeDroneParam('breath 0.7', setNativeDroneBreath, 0.7, event)}
+          >
+            NATIVE DRONE BREATH 0.7
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={(event) => handleNativeDroneParam('intensity 0.2', setNativeDroneIntensity, 0.2, event)}
+          >
+            NATIVE DRONE INTENSITY 0.2
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={(event) => handleNativeDroneParam('intensity 0.95', setNativeDroneIntensity, 0.95, event)}
+          >
+            NATIVE DRONE INTENSITY 0.95
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={(event) => handleNativeDroneParam('preset R+5+8', setNativeDronePartials, undefined, event)}
+          >
+            NATIVE DRONE PRESET (R+5+8)
+          </button>
+          <button
+            type="button"
+            className="audio-debug-action"
+            style={{ touchAction: 'manipulation' }}
+            onPointerDown={(event) =>
+              handleNativeDroneParam(
+                'partials root+oct',
+                setNativeDronePartials,
+                [
+                  { ratio: 1, gain: 0.6 },
+                  { ratio: 2, gain: 0.25 },
+                ],
+                event,
+              )
+            }
+          >
+            NATIVE DRONE PARTIALS (ROOT+OCT)
+          </button>
         </div>
-      ) : null}
+      </details>
 
-      {primerBeepStatus ? (
-        <div className="audio-debug-block">
-          <div className="audio-debug-label">Media primer + web beep</div>
-          <pre className={`audio-debug-pre ${primerBeepStatus.error ? 'audio-debug-bad' : ''}`}>
-            {formatJson(primerBeepStatus)}
-          </pre>
-        </div>
-      ) : null}
-
-      {nativeDroneStatus ? (
-        <div className="audio-debug-block">
-          <div className="audio-debug-label">Native drone POC (AVAudioSourceNode)</div>
-          <pre className={`audio-debug-pre ${nativeDroneStatus.error ? 'audio-debug-bad' : ''}`}>
-            {formatJson(nativeDroneStatus)}
-          </pre>
-        </div>
-      ) : null}
-
-      <div className="audio-debug-buttons">
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={handleTestTapVisible}
-        >
-          TEST TAP VISIBLE ({tapCounter})
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={handleTestNativeSession}
-        >
-          TEST NATIVE SESSION
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={handleTestRawBeep}
-        >
-          TEST RAW WEB AUDIO BEEP
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={handleTestNativeBeep}
-        >
-          TEST NATIVE BEEP
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={handleTestWebBeepNativePreset}
-        >
-          TEST WEB BEEP WITH NATIVE PRESET
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={handleTestMediaPrimerWebBeep}
-        >
-          TEST MEDIA PRIMER + WEB BEEP
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={handleStartNativeDrone}
-        >
-          START NATIVE DRONE (POC)
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={handleStopNativeDrone}
-        >
-          STOP NATIVE DRONE (POC)
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={(event) => handleNativeDroneVolume(0.05, event)}
-        >
-          NATIVE DRONE VOL 0.05
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={(event) => handleNativeDroneVolume(0.3, event)}
-        >
-          NATIVE DRONE VOL 0.3
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={(event) => handleNativeDroneParam('freq A2', setNativeDroneFrequency, 110, event)}
-        >
-          NATIVE DRONE FREQ A2 (110)
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={(event) => handleNativeDroneParam('freq D3', setNativeDroneFrequency, 146.83, event)}
-        >
-          NATIVE DRONE FREQ D3 (146.8)
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={(event) => handleNativeDroneParam('breath 0', setNativeDroneBreath, 0, event)}
-        >
-          NATIVE DRONE BREATH 0
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={(event) => handleNativeDroneParam('breath 0.7', setNativeDroneBreath, 0.7, event)}
-        >
-          NATIVE DRONE BREATH 0.7
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={(event) => handleNativeDroneParam('intensity 0.2', setNativeDroneIntensity, 0.2, event)}
-        >
-          NATIVE DRONE INTENSITY 0.2
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={(event) => handleNativeDroneParam('intensity 0.95', setNativeDroneIntensity, 0.95, event)}
-        >
-          NATIVE DRONE INTENSITY 0.95
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={(event) => handleNativeDroneParam('preset R+5+8', setNativeDronePartials, undefined, event)}
-        >
-          NATIVE DRONE PRESET (R+5+8)
-        </button>
-        <button
-          type="button"
-          className="audio-debug-action"
-          style={{ touchAction: 'manipulation' }}
-          onPointerDown={(event) =>
-            handleNativeDroneParam(
-              'partials root+oct',
-              setNativeDronePartials,
-              [
-                { ratio: 1, gain: 0.6 },
-                { ratio: 2, gain: 0.25 },
-              ],
-              event,
-            )
-          }
-        >
-          NATIVE DRONE PARTIALS (ROOT+OCT)
-        </button>
-      </div>
-
-      <div className="audio-debug-block">
-        <div className="audio-debug-label">Last 20 events (tick {tick})</div>
+      <details className="audio-debug-details" open>
+        <summary className="audio-debug-details-summary">Event log (tick {tick})</summary>
         <pre className="audio-debug-events">
           {recentEvents.length === 0
             ? '(no events yet)'
@@ -720,7 +843,7 @@ export function AudioDebugPanel({
                 })
                 .join('\n')}
         </pre>
-      </div>
+      </details>
     </section>
   )
 }

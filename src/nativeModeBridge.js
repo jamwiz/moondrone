@@ -36,6 +36,7 @@ import {
   setNativeMetronomeBpm,
   setNativeMetronomeMeter,
   setNativeMetronomeSoundMode,
+  setNativeToneLab,
   stopNativeDrone,
 } from './nativeDroneExperiment'
 
@@ -312,6 +313,14 @@ export function nativeModeSetMetronomeMeter(meter) {
 
 export function nativeModeSetMetronomeSoundMode(soundMode) {
   return safe(setNativeMetronomeSoundMode(soundMode ?? 'wood'))
+}
+
+// --- Native Tone Lab routing (Native Mode only) -----------------------------
+// Pushes a full (already-clamped) tone-lab settings object to the native engine. The
+// experiment/console layer (src/nativeToneLab.js) owns the state + localStorage; this is just
+// the error-safe transport. Never touches the Tone.js engine or metronome.
+export function nativeModeSetToneLab(settings = {}) {
+  return safe(setNativeToneLab(settings))
 }
 
 function clamp01(value) {

@@ -150,6 +150,14 @@ export async function setNativeMetronomeSoundMode(soundMode) {
   return result
 }
 
+// ---- Native Tone Lab (organ-timbre experiment, Native Mode only) -----------------------------
+// Pushes the (already-clamped) tone-lab settings object to Swift, which smooths every value so
+// live changes never click. Reversible: setting all organ amounts to 0 returns the prior sound.
+export async function setNativeToneLab(settings = {}) {
+  const result = await NativeDrone.setNativeToneLab(settings)
+  return result
+}
+
 // Console API so the native engine can be driven separately from the real engine:
 //   moondroneNativeDrone.start(0.2)
 //   moondroneNativeDrone.setFrequency(146.83)   // D3

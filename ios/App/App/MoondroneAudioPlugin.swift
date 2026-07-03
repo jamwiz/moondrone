@@ -636,9 +636,9 @@ final class NativeDroneEngine {
     private var gainMorphFramesRemaining = 0
     private var lastTransitionKind = "none"  // note | register | preset | glide | none (debug)
 
-    // Register-derived scalars smoothed over ~1.5 s so octave/register changes morph the output
-    // trim + filter brightness in step with the register deck crossfade (~1.55 s) — not faster.
-    private lazy var regCoeff = 1.0 - exp(-1.0 / (1.5 * sampleRate))
+    // Register-derived scalars smoothed over ~1.8 s so octave/register changes morph the output
+    // trim + filter brightness in step with the register deck crossfade (~1.80 s) — not faster.
+    private lazy var regCoeff = 1.0 - exp(-1.0 / (1.8 * sampleRate))
     private var curRegTrim = 1.0
     private var curRegBright = 1.0
 
@@ -692,7 +692,7 @@ final class NativeDroneEngine {
     private var curBeatMix = 0.0
     private var registerChangePending = false   // set by setRegister → next changeNote uses reg timing
     private lazy var noteXfadeFrames = Int(1.30 * sampleRate)      // key change overlap ~1.30 s
-    private lazy var registerXfadeFrames = Int(1.55 * sampleRate)  // register change overlap ~1.55 s
+    private lazy var registerXfadeFrames = Int(1.80 * sampleRate)  // register change overlap ~1.80 s
 
     // ---- Smoothed preset scalars (glided so a moon change never snaps pan/width/timbre) ------
     private var curWidth = 0.44                                   // smoothed mid/side width
@@ -715,6 +715,35 @@ final class NativeDroneEngine {
     private var moodSnapPending = false        // cold start snaps mood identity (no ramp-in)
     private var moodXfadeRemaining = 0         // frames left in the current mood ramp (debug/active)
     private lazy var moodXfadeTotalFrames = Int(1.2 * sampleRate)
+
+    // ---- Native Tone Lab (organ-timbre experiment) ------------------------------------------
+    // A REVERSIBLE, live-adjustable soft-organ/drawbar body layer, isolated to Native Mode. It adds
+    // a warm harmonic stack (sines + a little triangle/saw body + gentle formant) on top of the
+    // voice bank — aimed at restoring Titan/Strings' old "organy" glow without just being louder.
+    // Every param has a `tl*` main-thread target and a `cur*` render-smoothed value so live changes
+    // never click. Per-moon organ amount + trim resolve from the current preset and glide, so the
+    // organ participates in the existing moon crossfades. Defaults reproduce the current sound plus
+    // a subtle Titan experiment. All values are clamped. `setToneLab` merges partial updates.
+    private var tlOrganAmount = 0.25, curOrganAmount = 0.25
+    private var tlOrganBright = 0.30, curOrganBright = 0.30
+    private var tlOrganBlend = 0.25, curOrganBlend = 0.25
+    private var tlTriBody = 0.45, curTriBody = 0.45
+    private var tlSawBody = 0.18, curSawBody = 0.18
+    private var tlFormant = 0.18, curFormant = 0.18
+    private var tlOutputTrimDb = 0.0, curOutputTrimDb = 0.0
+    private var tlPresetOrgan: [String: Double] = ["Pure": 0.02, "Shruti": 0.08, "Strings": 0.45, "Cosmos": 0.18, "Binaural": 0.0]
+    private var tlPresetTrimDb: [String: Double] = ["Pure": 0.0, "Shruti": 0.0, "Strings": 0.0, "Cosmos": 0.0, "Binaural": 0.0]
+    private var curPresetOrgan = 0.08     // smoothed organ amount for the current moon
+    private var curPresetTrimDb = 0.0     // smoothed per-moon safety trim (dB)
+    private var organPhase = [Double](repeating: 0, count: 6)
+    private var organLp = 0.0             // soft low-pass on the organ layer (warmth)
+    private var organFormant = Biquad()   // gentle vowel/organ low-mid body
+    private var organRootHz = 146.83      // organ pitch GLIDES (no snap) so crossfades don't jump it
+    private lazy var organGlideCoeff = 1.0 - exp(-1.0 / (0.7 * sampleRate))  // ~0.7 s organ portamento
+    // Drawbar-style harmonics: sub, root, fifth, octave, twelfth, upper — "very controlled" upper.
+    private static let organRatios: [Double] = [0.5, 1.0, 1.5, 2.0, 3.0, 4.0]
+    private static let organDrawbar: [Double] = [0.26, 1.0, 0.24, 0.5, 0.18, 0.24]
+    private static let organMakeup = 0.55
 
     // ---- Native metronome (Native Mode only) -------------------------------------------------
     // Sample-accurate click generated on THIS render thread and mixed into the same output as the
@@ -849,6 +878,16 @@ final class NativeDroneEngine {
         for i in 0..<NativeDroneEngine.bankSize { curPan[i] = pPan[i] }
         curStringsMix = (presetName == "Strings") ? 1.0 : 0.0
         curBeatMix = (presetName == "Binaural") ? 1.0 : 0.0
+        // Snap Native Tone Lab (organ layer) to its targets so the drone begins in the requested
+        // timbre; live changes glide. Reset the organ oscillator/filter state.
+        curOrganAmount = tlOrganAmount; curOrganBright = tlOrganBright; curOrganBlend = tlOrganBlend
+        curTriBody = tlTriBody; curSawBody = tlSawBody; curFormant = tlFormant
+        curOutputTrimDb = tlOutputTrimDb
+        curPresetOrgan = tlPresetOrgan[presetName] ?? 0.0
+        curPresetTrimDb = tlPresetTrimDb[presetName] ?? 0.0
+        for i in 0..<6 { organPhase[i] = 0.0 }
+        organLp = 0.0; organFormant.reset()
+        organRootHz = targetRootHz        // begin the organ at the requested pitch (no glide-in)
         // Reset the pitch crossfade deck to idle (a cold start never crossfades).
         xfActive = false; xfArmPending = false; xfProgress = 0.0
         registerChangePending = false
@@ -900,6 +939,32 @@ final class NativeDroneEngine {
             // Binaural carrier fade: ramp in/out over the preset window (to/from Binaural).
             let beatTargetMix = (self.presetName == "Binaural") ? 1.0 : 0.0
             self.curBeatMix += (beatTargetMix - self.curBeatMix) * presetBufCoeff
+
+            // ---- Native Tone Lab (organ layer) glides. Globals dezip fast (~0.12 s), per-moon
+            // organ/trim glide over the preset window so the organ body morphs with moon changes. ----
+            let tlCoeff = 1.0 - exp(-Double(frameCount) / (0.12 * sr))
+            self.curOrganAmount += (self.tlOrganAmount - self.curOrganAmount) * tlCoeff
+            self.curOrganBright += (self.tlOrganBright - self.curOrganBright) * tlCoeff
+            self.curOrganBlend += (self.tlOrganBlend - self.curOrganBlend) * tlCoeff
+            self.curTriBody += (self.tlTriBody - self.curTriBody) * tlCoeff
+            self.curSawBody += (self.tlSawBody - self.curSawBody) * tlCoeff
+            self.curFormant += (self.tlFormant - self.curFormant) * tlCoeff
+            self.curOutputTrimDb += (self.tlOutputTrimDb - self.curOutputTrimDb) * tlCoeff
+            let organTargetForPreset = self.tlPresetOrgan[self.presetName] ?? 0.0
+            let trimTargetForPreset = self.tlPresetTrimDb[self.presetName] ?? 0.0
+            self.curPresetOrgan += (organTargetForPreset - self.curPresetOrgan) * presetBufCoeff
+            self.curPresetTrimDb += (trimTargetForPreset - self.curPresetTrimDb) * presetBufCoeff
+            // Organ layer soft low-pass cutoff (warm: ~650 Hz dark → ~3500 Hz at full brightness),
+            // and a gentle vowel/organ formant peak (subtle, scales with formantBody).
+            let organFc = 650.0 + 2850.0 * self.curOrganBright
+            let organW = 2.0 * Double.pi * organFc / sr
+            let organLpCoeff = organW / (1.0 + organW)
+            self.organFormant.setPeaking(760.0, 0.8, self.curFormant * 3.2, sr)
+            // Effective organ gain (timbre body, not loudness): global amount × per-moon × blend.
+            let organGain = self.curOrganAmount * self.curPresetOrgan * self.curOrganBlend * NativeDroneEngine.organMakeup
+            let organActive = organGain > 0.00005
+            // Safety trim (global + per-moon), applied to the drone drive only (never the metronome).
+            let toneLabTrimLin = pow(10.0, (self.curOutputTrimDb + self.curPresetTrimDb) / 20.0)
             if !custom {
                 for i in 0..<NativeDroneEngine.bankSize {
                     self.curPan[i] += (self.pPan[i] - self.curPan[i]) * presetBufCoeff
@@ -1239,6 +1304,43 @@ final class NativeDroneEngine {
                 var mix = voiceMix * xfIn + outMix * xfOut
                 var side = voiceSide * xfIn + outSide * xfOut
 
+                // Crossfade headroom: while both decks overlap (note/register change) the summed
+                // peaks of two uncorrelated pitches can exceed either alone. Dip the dry bed by up
+                // to ~-1.6 dB at the 50 % overlap point (compensated: fully back to unity by the
+                // ends) so the limiter isn't the only thing preventing clip/pop. overlap = xfIn·xfOut
+                // peaks at 0.25 → normalise ×4 → 0..1, then a gentle -1.6 dB (×0.83) at the peak.
+                if self.xfActive {
+                    let overlap = min(1.0, xfIn * xfOut * 4.0)
+                    let headroom = 1.0 - 0.17 * overlap
+                    mix *= headroom
+                    side *= headroom
+                }
+
+                // ---- Native Tone Lab organ layer: a soft drawbar/triangle/saw body (mono/centred
+                // for a stable glow). Added AFTER the deck blend at full, continuous gain so it never
+                // steps with xfIn — its pitch GLIDES (organRootHz, ~0.7 s) toward the target rather
+                // than snapping like the crossfade decks, so a note/register change has no organ gain
+                // jump, no waveform switch, and no phase reset. Flows through the shared tone chain +
+                // wash + limiter below (never bypasses safety). Metronome is added later, untouched.
+                // Glide the organ pitch every sample (even when silent) so it's never stale when the
+                // organ later fades in (e.g. a moon change into Strings) — no pitch jump on entry.
+                self.organRootHz += (self.targetRootHz - self.organRootHz) * self.organGlideCoeff
+                if organActive && !custom {
+                    var organRaw = 0.0
+                    for h in 0..<6 {
+                        self.organPhase[h] += twoPi * (self.organRootHz * NativeDroneEngine.organRatios[h]) / sr
+                        if self.organPhase[h] > twoPi { self.organPhase[h] -= twoPi }
+                        organRaw += NativeDroneEngine.organDrawbar[h] * sin(self.organPhase[h])
+                    }
+                    // Extra body from the root octave phase: hollow triangle + soft saw density.
+                    let body = self.curTriBody * 0.55 * self.triApprox(self.organPhase[1])
+                             + self.curSawBody * 0.45 * self.sawApprox(self.organPhase[1])
+                    var organ = organRaw * 0.42 + body
+                    self.organLp += organLpCoeff * (organ - self.organLp)   // warmth (soft low-pass)
+                    organ = self.organFormant.process(self.organLp)         // gentle vowel/organ peak
+                    mix += organ * organGain
+                }
+
                 // Air/wind: white noise → HP ~1.1 kHz → LP ~5 kHz → breath swell.
                 if noiseLevel > 0 {
                     self.rngState ^= self.rngState << 13
@@ -1367,7 +1469,7 @@ final class NativeDroneEngine {
                 }
 
                 // Master: smoothed register trim + makeup gain + tanh soft-clip limiter.
-                let drive = Double(self.currentVolume) * 1.68 * 1.1 * self.curRegTrim
+                let drive = Double(self.currentVolume) * 1.68 * 1.1 * self.curRegTrim * toneLabTrimLin
                 let sl = Float(tanh(left * drive + click) * 0.97)
                 let sr2 = Float(tanh(right * drive + click) * 0.97)
                 leftPtr?[frame] = sl
@@ -1560,6 +1662,33 @@ final class NativeDroneEngine {
         }
     }
 
+    /// Native Tone Lab (organ-timbre experiment). Merges partial updates; only keys present are
+    /// changed. All values clamped; targets glide on the render thread (no clicks). nil = untouched.
+    func setToneLab(organToneAmount: Double?, organToneBrightness: Double?, organToneBlend: Double?,
+                    triangleBody: Double?, sawBody: Double?, formantBody: Double?, outputTrimDb: Double?,
+                    pureOrgan: Double?, shrutiOrgan: Double?, stringsOrgan: Double?,
+                    cosmosOrgan: Double?, binauralOrgan: Double?,
+                    pureTrimDb: Double?, shrutiTrimDb: Double?, stringsTrimDb: Double?,
+                    cosmosTrimDb: Double?, binauralTrimDb: Double?) {
+        if let v = organToneAmount { tlOrganAmount = clamp01(v) }
+        if let v = organToneBrightness { tlOrganBright = clamp01(v) }
+        if let v = organToneBlend { tlOrganBlend = clamp01(v) }
+        if let v = triangleBody { tlTriBody = clamp01(v) }
+        if let v = sawBody { tlSawBody = clamp01(v) }
+        if let v = formantBody { tlFormant = clamp01(v) }
+        if let v = outputTrimDb { tlOutputTrimDb = max(-6.0, min(6.0, v)) }
+        if let v = pureOrgan { tlPresetOrgan["Pure"] = clamp01(v) }
+        if let v = shrutiOrgan { tlPresetOrgan["Shruti"] = clamp01(v) }
+        if let v = stringsOrgan { tlPresetOrgan["Strings"] = clamp01(v) }
+        if let v = cosmosOrgan { tlPresetOrgan["Cosmos"] = clamp01(v) }
+        if let v = binauralOrgan { tlPresetOrgan["Binaural"] = clamp01(v) }
+        if let v = pureTrimDb { tlPresetTrimDb["Pure"] = max(-6.0, min(6.0, v)) }
+        if let v = shrutiTrimDb { tlPresetTrimDb["Shruti"] = max(-6.0, min(6.0, v)) }
+        if let v = stringsTrimDb { tlPresetTrimDb["Strings"] = max(-6.0, min(6.0, v)) }
+        if let v = cosmosTrimDb { tlPresetTrimDb["Cosmos"] = max(-6.0, min(6.0, v)) }
+        if let v = binauralTrimDb { tlPresetTrimDb["Binaural"] = max(-6.0, min(6.0, v)) }
+    }
+
     // ---- Native metronome API (main thread) -------------------------------------------------
     private func clampMetBpm(_ bpm: Double) -> Double { return max(30.0, min(300.0, bpm)) }
 
@@ -1648,6 +1777,11 @@ final class NativeDroneEngine {
     // by the Strings ensemble to give the strings their reedy, harmonically rich body.
     @inline(__always) private func sawApprox(_ p: Double) -> Double {
         return (sin(p) + 0.5 * sin(2.0 * p) + 0.33 * sin(3.0 * p)) * 0.7
+    }
+
+    // Soft, hollow triangle-ish tone from a single phase (2-term Fourier) — for the organ body.
+    @inline(__always) private func triApprox(_ p: Double) -> Double {
+        return (sin(p) - sin(3.0 * p) / 9.0) * 0.95
     }
 
     /// Select a Moondrone moon preset (voice model mode).
@@ -1765,6 +1899,17 @@ final class NativeDroneEngine {
             "nativeMetronomeBpm": metBpm,
             "nativeMetronomeMeter": metMeter,
             "nativeMetronomeBeatIndex": metBeatIndex,
+            // ---- Native Tone Lab (organ timbre experiment) ----
+            "nativeToneLabActive": (curOrganAmount * curPresetOrgan * curOrganBlend) > 0.00005,
+            "organToneAmount": curOrganAmount,
+            "organToneBrightness": curOrganBright,
+            "organToneBlend": curOrganBlend,
+            "triangleBody": curTriBody,
+            "sawBody": curSawBody,
+            "formantBody": curFormant,
+            "currentPresetOrgan": curPresetOrgan,
+            "currentPresetTrimDb": curPresetTrimDb,
+            "outputTrimDb": curOutputTrimDb,
         ]
     }
 }
@@ -1793,7 +1938,8 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "stopNativeMetronome", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setNativeMetronomeBpm", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setNativeMetronomeMeter", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "setNativeMetronomeSoundMode", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "setNativeMetronomeSoundMode", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setNativeToneLab", returnType: CAPPluginReturnPromise)
     ]
 
     private let drone = NativeDroneEngine()
@@ -2031,6 +2177,32 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         drone.setMetronomeSoundMode(mode)
         call.resolve(["soundMode": mode])
+    }
+
+    /// Native Tone Lab (organ timbre experiment). Accepts any subset of the tone-lab keys; missing
+    /// keys are left untouched (the JS side normally sends the full merged settings object). Values
+    /// are re-clamped in the engine. Never affects the metronome or the Tone.js engine.
+    @objc func setNativeToneLab(_ call: CAPPluginCall) {
+        drone.setToneLab(
+            organToneAmount: call.getDouble("organToneAmount"),
+            organToneBrightness: call.getDouble("organToneBrightness"),
+            organToneBlend: call.getDouble("organToneBlend"),
+            triangleBody: call.getDouble("triangleBody"),
+            sawBody: call.getDouble("sawBody"),
+            formantBody: call.getDouble("formantBody"),
+            outputTrimDb: call.getDouble("outputTrimDb"),
+            pureOrgan: call.getDouble("pureOrgan"),
+            shrutiOrgan: call.getDouble("shrutiOrgan"),
+            stringsOrgan: call.getDouble("stringsOrgan"),
+            cosmosOrgan: call.getDouble("cosmosOrgan"),
+            binauralOrgan: call.getDouble("binauralOrgan"),
+            pureTrimDb: call.getDouble("pureTrimDb"),
+            shrutiTrimDb: call.getDouble("shrutiTrimDb"),
+            stringsTrimDb: call.getDouble("stringsTrimDb"),
+            cosmosTrimDb: call.getDouble("cosmosTrimDb"),
+            binauralTrimDb: call.getDouble("binauralTrimDb")
+        )
+        call.resolve(["state": drone.snapshot()])
     }
 }
 // =============================================================================
