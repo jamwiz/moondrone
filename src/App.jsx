@@ -26,6 +26,7 @@ import {
   isNativeModeEnabled,
   isNativeModeSupported,
   nativeModePlay,
+  nativeModeSetBinauralBeat,
   nativeModeSetBreath,
   nativeModeSetFrequency,
   nativeModeSetIntensity,
@@ -423,6 +424,7 @@ function App() {
           breath,
           volumePercent: volume,
           presetName: selectedPresetName,
+          binauralModeId,
         })
         setIsPlaying(true)
         setIsDroneStarting(false)
@@ -842,9 +844,9 @@ function App() {
 
     setSelectedPresetName(nextPreset.name)
 
-    // NATIVE MODE (temp experiment): map the moon to a native partial set.
+    // NATIVE MODE (temp experiment): map the moon to the native voice-model preset.
     if (isNativeModeEnabled()) {
-      nativeModeSetPreset(nextPreset.name)
+      nativeModeSetPreset(nextPreset.name, binauralModeId)
       return
     }
 
@@ -860,6 +862,12 @@ function App() {
   function handleBinauralModeChange(event) {
     const nextModeId = event.target.value
     setBinauralModeId(nextModeId)
+
+    if (isNativeModeEnabled()) {
+      nativeModeSetBinauralBeat(nextModeId)
+      return
+    }
+
     applyBinauralBeatToEngine(nextModeId)
   }
 

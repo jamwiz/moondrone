@@ -16,11 +16,13 @@
 // UIBackgroundModes are shared with the earlier native drone POC.)
 
 import { Capacitor } from '@capacitor/core'
+import { BINAURAL_MODES, DEFAULT_BINAURAL_MODE_ID } from './soundTuning'
 import {
+  setNativeDroneBinauralBeat,
   setNativeDroneBreath,
   setNativeDroneFrequency,
   setNativeDroneIntensity,
-  setNativeDronePartials,
+  setNativeDronePreset,
   setNativeDroneVolume,
   startNativeDrone,
   stopNativeDrone,
@@ -132,6 +134,25 @@ export function partialsForPreset(presetName) {
   return PRESET_PARTIALS[presetName] ?? PRESET_PARTIALS.Shruti
 }
 
+// Presets the native voice model knows by name (src Swift NativeDroneEngine.presets).
+const NATIVE_MODEL_PRESETS = new Set(['Pure', 'Shruti', 'Strings', 'Cosmos', 'Binaural'])
+
+function nativePresetName(presetName) {
+  return NATIVE_MODEL_PRESETS.has(presetName) ? presetName : 'Shruti'
+}
+
+// Selected binaural mode → beat Hz (matches soundTuning BINAURAL_MODES). Non-Binaural
+// presets get 0 so the native engine renders no L/R beat carriers.
+export function beatHzForMode(binauralModeId) {
+  const mode = BINAURAL_MODES.find((m) => m.id === binauralModeId)
+    ?? BINAURAL_MODES.find((m) => m.id === DEFAULT_BINAURAL_MODE_ID)
+  return mode?.beatHz ?? 4
+}
+
+function beatHzForPreset(presetName, binauralModeId) {
+  return presetName === 'Binaural' ? beatHzForMode(binauralModeId) : 0
+}
+
 // --- Routing (UI values → NativeDrone). All fire-and-forget + error-safe. ----
 
 function safe(promise) {
@@ -141,13 +162,16 @@ function safe(promise) {
   })
 }
 
-// uiVolumePercent is 0–100; NativeDrone expects 0–1.
-export function nativeModePlay({ key, octave, referenceA, intensity, breath, volumePercent, presetName }) {
+// uiVolumePercent is 0–100; NativeDrone expects 0–1. Presets are now driven by NAME so
+// the native "Moondrone voice model" (voiceGains, breath, air, tone) does the synthesis.
+export function nativeModePlay({ key, octave, referenceA, intensity, breath, volumePercent, presetName, binauralModeId }) {
   const hz = keyOctaveToHz(key, octave, referenceA)
+  const preset = nativePresetName(presetName)
   return safe(
     (async () => {
       await startNativeDrone(clamp01(volumePercent / 100))
-      await setNativeDronePartials(partialsForPreset(presetName))
+      await setNativeDronePreset(preset)
+      await setNativeDroneBinauralBeat(beatHzForPreset(preset, binauralModeId))
       await setNativeDroneFrequency(hz)
       await setNativeDroneIntensity(clamp01(intensity / 100))
       await setNativeDroneBreath(clamp01(breath / 100))
@@ -175,8 +199,18 @@ export function nativeModeSetVolume(uiPercent) {
   return safe(setNativeDroneVolume(clamp01(uiPercent / 100)))
 }
 
-export function nativeModeSetPreset(presetName) {
-  return safe(setNativeDronePartials(partialsForPreset(presetName)))
+export function nativeModeSetPreset(presetName, binauralModeId) {
+  const preset = nativePresetName(presetName)
+  return safe(
+    (async () => {
+      await setNativeDronePreset(preset)
+      await setNativeDroneBinauralBeat(beatHzForPreset(preset, binauralModeId))
+    })(),
+  )
+}
+
+export function nativeModeSetBinauralBeat(binauralModeId) {
+  return safe(setNativeDroneBinauralBeat(beatHzForMode(binauralModeId)))
 }
 
 function clamp01(value) {

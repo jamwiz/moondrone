@@ -68,6 +68,18 @@ export async function setNativeDroneIntensity(value) {
   return result
 }
 
+export async function setNativeDronePreset(name) {
+  const result = await NativeDrone.setNativeDronePreset({ name })
+  console.log('[NativeDrone] setNativeDronePreset ->', result)
+  return result
+}
+
+export async function setNativeDroneBinauralBeat(beatHz) {
+  const result = await NativeDrone.setNativeDroneBinauralBeat({ beatHz })
+  console.log('[NativeDrone] setNativeDroneBinauralBeat ->', result)
+  return result
+}
+
 // Console API so the native engine can be driven separately from the real engine:
 //   moondroneNativeDrone.start(0.2)
 //   moondroneNativeDrone.setFrequency(146.83)   // D3
@@ -85,6 +97,8 @@ if (typeof window !== 'undefined') {
     setPartials: setNativeDronePartials,
     setBreath: setNativeDroneBreath,
     setIntensity: setNativeDroneIntensity,
+    setPreset: setNativeDronePreset,
+    setBinauralBeat: setNativeDroneBinauralBeat,
     isAvailable: isNativeDroneAvailable,
     DEFAULT_PARTIALS: NATIVE_DRONE_DEFAULT_PARTIALS,
   }
