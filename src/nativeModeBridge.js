@@ -18,6 +18,7 @@
 import { Capacitor } from '@capacitor/core'
 import { BINAURAL_MODES, DEFAULT_BINAURAL_MODE_ID } from './soundTuning'
 import { DEFAULT_MOOD_ID } from './moods'
+import { METRONOME_STRAIGHT_METER } from './metronomeSamples'
 import {
   configureAndStartNativeDrone,
   reassertNativeDrone,
@@ -29,6 +30,11 @@ import {
   setNativeDronePreset,
   setNativeDroneRegister,
   setNativeDroneVolume,
+  startNativeMetronome,
+  stopNativeMetronome,
+  setNativeMetronomeBpm,
+  setNativeMetronomeMeter,
+  setNativeMetronomeSoundMode,
   stopNativeDrone,
 } from './nativeDroneExperiment'
 
@@ -253,6 +259,52 @@ export function nativeModeSetPreset(presetName, binauralModeId) {
 
 export function nativeModeSetBinauralBeat(binauralModeId) {
   return safe(setNativeDroneBinauralBeat(beatHzForMode(binauralModeId)))
+}
+
+// --- Native metronome routing (Native Mode only) ----------------------------
+// The Tone.js metronome path (Tone.start / ensureMetronomeChain / media-primer) reconfigured
+// the shared iOS audio session and got interrupted, killing the native drone. In Native Mode the
+// metronome is synthesized natively and mixed into the same render path — no Tone/WebAudio at all.
+
+// The Tone meter model is a string: 'straight' (no accent) or a beats-per-bar number-string.
+// The native engine wants an Int: 0 = straight, else the beat count.
+function nativeMeterInt(meter) {
+  if (meter === METRONOME_STRAIGHT_METER || meter === 'straight') {
+    return 0
+  }
+  const n = Number(meter)
+  return Number.isFinite(n) ? Math.max(0, Math.min(12, Math.round(n))) : 4
+}
+
+function safeBpm(bpm) {
+  const n = Number(bpm)
+  return Number.isFinite(n) ? Math.max(30, Math.min(300, Math.round(n))) : 100
+}
+
+export function nativeModeStartMetronome({ bpm, meter, soundMode } = {}) {
+  return safe(
+    startNativeMetronome({
+      bpm: safeBpm(bpm),
+      meter: nativeMeterInt(meter),
+      soundMode: soundMode ?? 'wood',
+    }),
+  )
+}
+
+export function nativeModeStopMetronome() {
+  return safe(stopNativeMetronome())
+}
+
+export function nativeModeSetMetronomeBpm(bpm) {
+  return safe(setNativeMetronomeBpm(safeBpm(bpm)))
+}
+
+export function nativeModeSetMetronomeMeter(meter) {
+  return safe(setNativeMetronomeMeter(nativeMeterInt(meter)))
+}
+
+export function nativeModeSetMetronomeSoundMode(soundMode) {
+  return safe(setNativeMetronomeSoundMode(soundMode ?? 'wood'))
 }
 
 function clamp01(value) {

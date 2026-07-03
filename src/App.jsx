@@ -26,16 +26,20 @@ import {
   isNativeModeEnabled,
   isNativeModeSupported,
   nativeModePlay,
-  nativeModeReassert,
   nativeModeSetBinauralBeat,
   nativeModeSetBreath,
   nativeModeSetFrequency,
   nativeModeSetIntensity,
   nativeModeSetMood,
+  nativeModeSetMetronomeBpm,
+  nativeModeSetMetronomeMeter,
+  nativeModeSetMetronomeSoundMode,
   nativeModeSetPreset,
   nativeModeSetRegister,
   nativeModeSetVolume,
+  nativeModeStartMetronome,
   nativeModeStop,
+  nativeModeStopMetronome,
   setNativeModeEnabled,
 } from './nativeModeBridge'
 import { ensurePrimerPlaying, getPrimerDebugState, isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
@@ -254,6 +258,22 @@ function App() {
       return
     }
 
+    // Native Mode: the click is generated in Swift and never fires droneEngine.onMetronomeBeat, so
+    // approximate the moon pulse with a JS timer at the current BPM. Audio timing is owned by the
+    // native engine; this visual is best-effort only.
+    if (isNativeModeEnabled()) {
+      const meter = Number(DEFAULT_METRONOME_METER) || 0
+      const intervalMs = Math.max(150, Math.round(60000 / Math.max(30, metronomeBpm)))
+      setMetronomePulse((prev) => ({ tick: prev.tick + 1, downbeat: true }))
+      let beat = 1
+      const id = setInterval(() => {
+        const downbeat = meter >= 1 ? beat % meter === 0 : false
+        setMetronomePulse((prev) => ({ tick: prev.tick + 1, downbeat }))
+        beat = meter >= 1 ? (beat + 1) % meter : 0
+      }, intervalMs)
+      return () => clearInterval(id)
+    }
+
     droneEngine.onMetronomeBeat = (downbeat) => {
       setMetronomePulse((prev) => ({ tick: prev.tick + 1, downbeat }))
     }
@@ -261,7 +281,7 @@ function App() {
     return () => {
       droneEngine.onMetronomeBeat = null
     }
-  }, [isMetronomePlaying])
+  }, [isMetronomePlaying, metronomeBpm])
 
   useEffect(() => {
     try {
@@ -949,76 +969,48 @@ function App() {
     droneEngine.setVolume(toEngineVolume(nextVolume))
   }
 
-  // NATIVE MODE metronome (temp experiment): start the WebAudio metronome scheduler while the
-  // native Swift drone keeps playing. Isolation guarantees:
+  // NATIVE MODE metronome (temp experiment): the click is synthesized NATIVELY in Swift and mixed
+  // into the same AVAudioEngine render path as the native drone. This deliberately touches NONE of
+  // the Tone.js/WebAudio machinery — no Tone.start(), no ensureMetronomeChain, no media-primer, no
+  // droneEngine.startMetronome, no shared-session reconfigure — because that path emitted an audio
+  // session interruption that killed the native drone. Isolation guarantees:
   //   • never calls nativeModeStop / droneEngine.stop / setIsPlaying(false)
   //   • never judges the native drone via droneEngine.isReady/contextState
-  //   • skips the aggressive native session reconfigure (skipNativeReconfigure)
-  //   • re-asserts the native drone afterward (recovers if the shared session was bumped)
-  //   • on failure, stops ONLY the metronome and leaves the native drone + its UI untouched
-  async function startMetronomeOverNativeDrone() {
-    const operationToken = beginMetronomeOperation('play')
+  //   • on failure, only the metronome UI is cleared; the native drone is left untouched
+  async function startNativeModeMetronome() {
+    const startedAtMs = performance.now()
     metronomeStartPendingRef.current = true
     setMetronomePulse({ tick: 0, downbeat: false })
-
-    // The native drone already owns a live `.playback` session and running audio graph, so this
-    // is the FAST path (mirrors the Tone "drone already running" case): skip the media-primer
-    // startup guard AND primeForPlayback entirely (droneEngine.startMetronome resumes the Tone
-    // context + primer itself, inside this tap's gesture window), skip the native session
-    // reconfigure, and start the audible scheduler immediately via fastAudibleStart — no drone
-    // settle/recovery window. No cold rebuild.
-    const contextBefore = droneEngine.getContextState?.() ?? 'unknown'
-    const startedAtMs = performance.now()
-    audioDiag('metronome', 'native-mode metronome path ENTERED (fast, over native drone)', {
-      contextBefore,
-      primerSkipped: true,
+    audioDiag('metronome', 'native-mode NATIVE metronome path ENTERED (Swift click, no Tone/WebAudio)', {
       bpm: metronomeBpm,
+      meter: DEFAULT_METRONOME_METER,
+      soundMode: DEFAULT_METRONOME_SOUND_MODE,
+      dronePlaying: isPlaying,
+      primerSkipped: true,
+      toneSkipped: true,
     })
 
     try {
-      droneEngine.setMetronomeSoundMode(DEFAULT_METRONOME_SOUND_MODE)
-      droneEngine.setMetronomeMeter(DEFAULT_METRONOME_METER)
-      const startResult = await droneEngine.startMetronome(metronomeBpm, {
-        operationToken,
-        skipNativeReconfigure: true,
-        fastAudibleStart: true,
+      const result = await nativeModeStartMetronome({
+        bpm: metronomeBpm,
+        meter: DEFAULT_METRONOME_METER,
+        soundMode: DEFAULT_METRONOME_SOUND_MODE,
       })
-
-      if (!isMetronomeOperationCurrent(operationToken)) {
-        audioDiag('metronome', 'stale native metronome op ignored', { phase: 'after-startMetronome' })
-        droneEngine.stopMetronome({ droneActive: true })
-        return
-      }
-
-      if (!isMetronomeEngineReady()) {
-        droneEngine.stopMetronome({ droneActive: true })
-        throw new Error('Native-mode metronome failed — scheduler/context not ready after start')
-      }
-
       setIsMetronomePlaying(true)
-      // startMetronome skipped the native reconfigure, so the native drone should be untouched.
-      // Reassert only recovers the AVAudioEngine graph if it was somehow bumped — never toggles UI.
-      nativeModeReassert()
-      audioDiag('metronome', 'native-mode metronome START SUCCESS', {
-        startMetronomeMs: Math.round(performance.now() - startedAtMs),
-        contextBefore,
-        contextAfter: droneEngine.getContextState?.() ?? 'unknown',
-        startupRecovered: startResult?.startupRecovered === true,
-        nativeDroneReasserted: 'requested (recover-if-bumped)',
+      audioDiag('metronome', 'native-mode NATIVE metronome START SUCCESS', {
+        startMs: Math.round(performance.now() - startedAtMs),
+        nativeMetronomePlaying: result?.state?.nativeMetronomePlaying ?? null,
         success: true,
       })
     } catch (error) {
-      // Honest failure: stop ONLY the metronome. Never stop the native drone, never set drone
-      // isPlaying false, never poison shared audio health (isPlaying stays true → guarded).
-      audioDiag('metronome', 'native-mode metronome START FAILED — native drone left untouched', {
+      // Honest failure: clear ONLY the metronome UI; the native drone graph is untouched.
+      audioDiag('metronome', 'native-mode NATIVE metronome START FAILED — drone left untouched', {
         message: error?.message ?? String(error),
-        startMetronomeMs: Math.round(performance.now() - startedAtMs),
+        startMs: Math.round(performance.now() - startedAtMs),
         success: false,
       })
       console.error('[Moondrone metronome] native-mode start failed', error)
-      droneEngine.stopMetronome({ droneActive: true })
       setIsMetronomePlaying(false)
-      nativeModeReassert()
     } finally {
       metronomeStartPendingRef.current = false
     }
@@ -1045,11 +1037,12 @@ function App() {
       return
     }
 
-    // NATIVE MODE (temp experiment): the native drone is a separate AVAudioEngine graph, so
-    // the Tone drone diagnostics are meaningless for it. Layer the WebAudio metronome OVER the
-    // running native drone via an isolated path that never stops/judges the native drone.
-    if (isNativeModeEnabled() && isPlaying) {
-      await startMetronomeOverNativeDrone()
+    // NATIVE MODE (temp experiment): the metronome is synthesized natively in Swift and mixed into
+    // the native drone's render path — NO Tone.js/WebAudio/media-primer/session reconfigure. This
+    // branch is taken whenever Native Mode is on (even if the drone is stopped: the native engine
+    // starts itself silently for the click), so it can never fall through to the Tone path.
+    if (isNativeModeEnabled()) {
+      await startNativeModeMetronome()
       return
     }
 
@@ -1224,13 +1217,12 @@ function App() {
     beginMetronomeOperation('stop')
     metronomeStartPendingRef.current = false
 
-    // NATIVE MODE (temp experiment): stop ONLY the WebAudio metronome scheduler; the native
-    // drone is a separate graph, so skip the Tone-drone output verify/repair and just re-assert
-    // the native drone. droneActive:true keeps stopMetronome from pausing the primer/tearing down.
-    if (isNativeModeEnabled() && isPlaying) {
-      droneEngine.stopMetronome({ droneActive: true })
+    // NATIVE MODE (temp experiment): stop ONLY the native Swift metronome. No Tone/WebAudio was
+    // ever started, so there is nothing to tear down there. The native drone is a separate concern
+    // and keeps playing (the native engine only decays the in-flight click).
+    if (isNativeModeEnabled()) {
+      nativeModeStopMetronome()
       setIsMetronomePlaying(false)
-      nativeModeReassert()
       return
     }
 
@@ -1253,6 +1245,13 @@ function App() {
   function handleMetronomeBpmChange(event) {
     const nextBpm = Number(event.target.value)
     setMetronomeBpm(nextBpm)
+
+    // Native Mode: live-update the native Swift metronome; never touch the Tone metronome engine.
+    if (isNativeModeEnabled()) {
+      nativeModeSetMetronomeBpm(nextBpm)
+      return
+    }
+
     droneEngine.setMetronomeBpm(nextBpm)
   }
 

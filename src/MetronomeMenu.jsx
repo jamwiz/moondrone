@@ -36,6 +36,19 @@ export function MetronomeMenu({
       ...(droneEngine.getMetronomeDiagnostics?.() ?? {}),
     })
 
+    // Robust pointer/click dedupe. A tap fires pointerdowncapture first, then a paired `click` a
+    // few ms later. In Native Mode the start is fast and the primer/pending flags are NOT set, so
+    // the old flag-based skip could let that paired click through and immediately toggle Stop. Any
+    // click within a short window of the last activation is a duplicate — always drop it. A
+    // standalone click (keyboard/a11y, no recent pointerdown) still activates normally.
+    if (source === 'click' && Date.now() - lastTransportActivationRef.current < 600) {
+      audioDiag('metronome-tap', 'paired click ignored (within pointerdown window)', {
+        sinceLastActivationMs: Date.now() - lastTransportActivationRef.current,
+      })
+      playIssuedViaPointerRef.current = false
+      return
+    }
+
     if (isPlaying) {
       playIssuedViaPointerRef.current = false
       const now = Date.now()

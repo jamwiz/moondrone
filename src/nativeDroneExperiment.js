@@ -114,6 +114,36 @@ export async function setNativeDroneMood(name) {
   return result
 }
 
+// ---- Native metronome (Native Mode only) ----------------------------------------------------
+// Fully native click synthesis mixed into the same render path as the native drone — no Tone.js,
+// WebAudio, media-primer, or session reconfigure. meter: 0 = straight (no accent), 2…6 = beats/bar.
+export async function startNativeMetronome({ bpm, meter, soundMode } = {}) {
+  const result = await NativeDrone.startNativeMetronome({ bpm, meter, soundMode })
+  console.log('[NativeDrone] startNativeMetronome ->', result)
+  return result
+}
+
+export async function stopNativeMetronome() {
+  const result = await NativeDrone.stopNativeMetronome()
+  console.log('[NativeDrone] stopNativeMetronome ->', result)
+  return result
+}
+
+export async function setNativeMetronomeBpm(bpm) {
+  const result = await NativeDrone.setNativeMetronomeBpm({ bpm })
+  return result
+}
+
+export async function setNativeMetronomeMeter(meter) {
+  const result = await NativeDrone.setNativeMetronomeMeter({ meter })
+  return result
+}
+
+export async function setNativeMetronomeSoundMode(soundMode) {
+  const result = await NativeDrone.setNativeMetronomeSoundMode({ soundMode })
+  return result
+}
+
 // Console API so the native engine can be driven separately from the real engine:
 //   moondroneNativeDrone.start(0.2)
 //   moondroneNativeDrone.setFrequency(146.83)   // D3
@@ -137,6 +167,11 @@ if (typeof window !== 'undefined') {
     setMood: setNativeDroneMood,
     configureAndStart: configureAndStartNativeDrone,
     reassert: reassertNativeDrone,
+    startMetronome: startNativeMetronome,
+    stopMetronome: stopNativeMetronome,
+    setMetronomeBpm: setNativeMetronomeBpm,
+    setMetronomeMeter: setNativeMetronomeMeter,
+    setMetronomeSoundMode: setNativeMetronomeSoundMode,
     isAvailable: isNativeDroneAvailable,
     DEFAULT_PARTIALS: NATIVE_DRONE_DEFAULT_PARTIALS,
   }
