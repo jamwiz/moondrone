@@ -55,7 +55,12 @@ function getEngineSnapshot() {
   }
 }
 
-export function AudioDebugPanel({ uiIsMetronomePlaying }) {
+export function AudioDebugPanel({
+  uiIsMetronomePlaying,
+  nativeModeEnabled = false,
+  nativeModeSupported = false,
+  onToggleNativeMode,
+}) {
   const [tick, setTick] = useState(0)
   const [collapsed, setCollapsed] = useState(false)
   const [tapCounter, setTapCounter] = useState(0)
@@ -427,6 +432,29 @@ export function AudioDebugPanel({ uiIsMetronomePlaying }) {
       </header>
 
       {copyStatus ? <p className="audio-debug-copy-status">{copyStatus}</p> : null}
+
+      <div className="audio-debug-block">
+        <div className="audio-debug-label">
+          Native iOS Engine mode {nativeModeSupported ? '' : '(native platform only)'}
+        </div>
+        <button
+          type="button"
+          className={`audio-debug-action ${nativeModeEnabled ? 'audio-debug-bad' : ''}`}
+          style={{ touchAction: 'manipulation' }}
+          onPointerDown={(event) => {
+            event.preventDefault()
+            event.stopPropagation()
+            onToggleNativeMode?.()
+          }}
+        >
+          {nativeModeEnabled ? 'NATIVE MODE: ON → Tone.js' : 'NATIVE MODE: OFF → Native'}
+        </button>
+        <p className="audio-debug-value">
+          {nativeModeEnabled
+            ? 'UI Play/key/intensity/breath/volume/preset drive the native Swift engine.'
+            : 'UI drives the Tone.js engine (default).'}
+        </p>
+      </div>
 
       <div className="audio-debug-grid">
         <div>

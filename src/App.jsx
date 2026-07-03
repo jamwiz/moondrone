@@ -22,6 +22,18 @@ import { getMoonArtworkSrc } from './moonArtwork'
 import { audioDiag, AUDIO_DIAG } from './audioDiagnostics'
 import { AudioDebugPanel } from './AudioDebugPanel'
 import { addNativeAudioSessionListeners, configureNativePlaybackSession, forceNextNativePlaybackConfigure, isNativePlaybackActive } from './nativeAudioSession'
+import {
+  isNativeModeEnabled,
+  isNativeModeSupported,
+  nativeModePlay,
+  nativeModeSetBreath,
+  nativeModeSetFrequency,
+  nativeModeSetIntensity,
+  nativeModeSetPreset,
+  nativeModeSetVolume,
+  nativeModeStop,
+  setNativeModeEnabled,
+} from './nativeModeBridge'
 import { ensurePrimerPlaying, getPrimerDebugState, isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
 import { markUserAudioAction } from './audioActivity'
 import {
@@ -154,6 +166,7 @@ function App() {
   const [binauralModeId, setBinauralModeId] = useState(DEFAULT_BINAURAL_MODE_ID)
   const [isPlaying, setIsPlaying] = useState(false)
   const [isDroneStarting, setIsDroneStarting] = useState(false)
+  const [nativeMode, setNativeMode] = useState(isNativeModeEnabled())
   const [metronomeBpm, setMetronomeBpm] = useState(DEFAULT_METRONOME_BPM)
   const [isMetronomePlaying, setIsMetronomePlaying] = useState(false)
   const [metronomePulse, setMetronomePulse] = useState({ tick: 0, downbeat: false })
@@ -398,6 +411,32 @@ function App() {
     setIsDroneStarting(true)
     isStartingRef.current = true
 
+    // NATIVE MODE (temp experiment): route Play to the native Swift engine instead of Tone.js.
+    // Tone.js is untouched; when Native Mode is off this branch never runs.
+    if (isNativeModeEnabled()) {
+      try {
+        await nativeModePlay({
+          key: selectedKey,
+          octave: selectedOctave,
+          referenceA,
+          intensity,
+          breath,
+          volumePercent: volume,
+          presetName: selectedPresetName,
+        })
+        setIsPlaying(true)
+        setIsDroneStarting(false)
+        audioDiag('native-mode', 'native drone play', { key: selectedKey, octave: selectedOctave, preset: selectedPresetName })
+      } catch (error) {
+        audioDiag('native-mode', 'native drone play failed', { message: error?.message ?? String(error) })
+        setIsPlaying(false)
+        setIsDroneStarting(false)
+      } finally {
+        isStartingRef.current = false
+      }
+      return
+    }
+
     // Invariant: never layer a new Play over live audio. If the UI says stopped but the engine still
     // reports playing, correct to a clean stop first so this Play starts from an honest state (this
     // makes "audio playing while UI says Ready" impossible even if a prior stop desynced).
@@ -578,6 +617,24 @@ function App() {
     }
   }
 
+  // NATIVE MODE (temp experiment): toggle which engine the UI drives. Stops whatever is
+  // currently playing so we never leave both engines running, then flips the routing flag.
+  function handleToggleNativeMode() {
+    const next = !nativeMode
+    if (isPlaying) {
+      if (nativeMode) {
+        nativeModeStop()
+      } else {
+        droneEngine.stop()
+      }
+      setIsPlaying(false)
+      setIsDroneStarting(false)
+    }
+    setNativeModeEnabled(next)
+    setNativeMode(next)
+    audioDiag('native-mode', 'native mode toggled', { enabled: next })
+  }
+
   function handleStop() {
     if (!isPlaying) {
       setIsDroneStarting(false)
@@ -586,6 +643,15 @@ function App() {
 
     markUserAudioAction()
     setIsDroneStarting(false)
+
+    // NATIVE MODE (temp experiment): route Stop to the native Swift engine.
+    if (isNativeModeEnabled()) {
+      nativeModeStop()
+      setIsPlaying(false)
+      audioDiag('native-mode', 'native drone stop')
+      return
+    }
+
     audioDiag('drone-lifecycle', 'drone stop fade begin')
     droneEngine.stop()
     setIsPlaying(false)
@@ -638,6 +704,14 @@ function App() {
 
   async function handleKeyChange(key) {
     setSelectedKey(key)
+
+    // NATIVE MODE (temp experiment): update native root frequency; no Tone.js autostart.
+    if (isNativeModeEnabled()) {
+      if (isPlaying) {
+        nativeModeSetFrequency(key, selectedOctave, referenceA)
+      }
+      return
+    }
 
     if (shouldForwardKeyToEngine()) {
       droneEngine.setKey(key)
@@ -741,6 +815,15 @@ function App() {
 
   function handleOctaveChange(octave) {
     setSelectedOctave(octave)
+
+    // NATIVE MODE (temp experiment): recompute native root frequency for the new register.
+    if (isNativeModeEnabled()) {
+      if (isPlaying) {
+        nativeModeSetFrequency(selectedKey, octave, referenceA)
+      }
+      return
+    }
+
     droneEngine.setOctave(octave)
   }
 
@@ -758,6 +841,12 @@ function App() {
     }
 
     setSelectedPresetName(nextPreset.name)
+
+    // NATIVE MODE (temp experiment): map the moon to a native partial set.
+    if (isNativeModeEnabled()) {
+      nativeModeSetPreset(nextPreset.name)
+      return
+    }
 
     // Reverb is fixed (FIXED_REVERB_PERCENT) and intentionally not changed by
     // preset selection, so the subtle background space stays consistent.
@@ -782,6 +871,12 @@ function App() {
   function handleIntensityChange(event) {
     const nextIntensity = Number(event.target.value)
     setIntensity(nextIntensity)
+
+    if (isNativeModeEnabled()) {
+      nativeModeSetIntensity(nextIntensity)
+      return
+    }
+
     droneEngine.setIntensity(nextIntensity)
   }
 
@@ -797,7 +892,12 @@ function App() {
   function handleBreathChange(event) {
     const nextBreath = Number(event.target.value)
     setBreath(nextBreath)
-    droneEngine.setBreath(nextBreath)
+
+    if (isNativeModeEnabled()) {
+      nativeModeSetBreath(nextBreath)
+    } else {
+      droneEngine.setBreath(nextBreath)
+    }
 
     if (!isBreathDraggingRef.current) {
       setBreathVisual(nextBreath)
@@ -807,6 +907,12 @@ function App() {
   function handleVolumeChange(event) {
     const nextVolume = Math.min(100, Math.max(0, Number(event.target.value)))
     setVolume(nextVolume)
+
+    if (isNativeModeEnabled()) {
+      nativeModeSetVolume(nextVolume)
+      return
+    }
+
     droneEngine.setVolume(toEngineVolume(nextVolume))
   }
 
@@ -1370,7 +1476,14 @@ function App() {
         </Suspense>
       ) : null}
 
-      {AUDIO_DIAG ? <AudioDebugPanel uiIsMetronomePlaying={isMetronomePlaying} /> : null}
+      {AUDIO_DIAG ? (
+        <AudioDebugPanel
+          uiIsMetronomePlaying={isMetronomePlaying}
+          nativeModeEnabled={nativeMode}
+          nativeModeSupported={isNativeModeSupported()}
+          onToggleNativeMode={handleToggleNativeMode}
+        />
+      ) : null}
     </main>
   )
 }
