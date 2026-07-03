@@ -293,6 +293,96 @@ struct Biquad {
     }
 }
 
+// ---- Lightweight stereo "wash" (Schroeder/Freeverb-style) --------------------------------
+// A compact, self-contained reverb rendered inside the source node (NO AVAudioUnitReverb, so
+// there is no added latency, no external tail state to manage, and it reverts with this file).
+// 8 comb + 4 allpass filters per channel with a small L/R delay spread → a diffuse pad wash.
+// Stable by construction: comb feedback stays < 1, allpass feedback is fixed 0.5, and the
+// master tanh limiter downstream catches any peak. Dry path keeps its own DC block + limiter.
+private struct CombFilter {
+    var buffer: [Double]
+    var bufIdx = 0
+    var filterStore = 0.0
+    var feedback = 0.5
+    var damp1 = 0.25
+    var damp2 = 0.75
+    init(size: Int) { buffer = [Double](repeating: 0, count: max(1, size)) }
+    mutating func reset() { for i in buffer.indices { buffer[i] = 0 }; filterStore = 0 }
+    mutating func setDamp(_ d: Double) { damp1 = d; damp2 = 1.0 - d }
+    @inline(__always) mutating func process(_ input: Double) -> Double {
+        let output = buffer[bufIdx]
+        filterStore = output * damp2 + filterStore * damp1
+        buffer[bufIdx] = input + filterStore * feedback
+        bufIdx += 1
+        if bufIdx >= buffer.count { bufIdx = 0 }
+        return output
+    }
+}
+
+private struct AllpassFilter {
+    var buffer: [Double]
+    var bufIdx = 0
+    var feedback = 0.5
+    init(size: Int) { buffer = [Double](repeating: 0, count: max(1, size)) }
+    mutating func reset() { for i in buffer.indices { buffer[i] = 0 } }
+    @inline(__always) mutating func process(_ input: Double) -> Double {
+        let bufout = buffer[bufIdx]
+        let output = -input + bufout
+        buffer[bufIdx] = input + bufout * feedback
+        bufIdx += 1
+        if bufIdx >= buffer.count { bufIdx = 0 }
+        return output
+    }
+}
+
+private final class FreeverbWash {
+    // Classic Freeverb delay tunings (samples @ 44.1 kHz) + a small stereo spread.
+    private static let combTunings = [1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617]
+    private static let allpassTunings = [556, 441, 341, 225]
+    private static let stereoSpread = 23
+    private static let fixedGain = 0.015     // Freeverb input scale (keeps the tail well-behaved)
+
+    private var combsL: [CombFilter] = []
+    private var combsR: [CombFilter] = []
+    private var apL: [AllpassFilter] = []
+    private var apR: [AllpassFilter] = []
+
+    init() {
+        for t in FreeverbWash.combTunings {
+            combsL.append(CombFilter(size: t))
+            combsR.append(CombFilter(size: t + FreeverbWash.stereoSpread))
+        }
+        for t in FreeverbWash.allpassTunings {
+            var l = AllpassFilter(size: t); l.feedback = 0.5; apL.append(l)
+            var r = AllpassFilter(size: t + FreeverbWash.stereoSpread); r.feedback = 0.5; apR.append(r)
+        }
+    }
+
+    func reset() {
+        for i in combsL.indices { combsL[i].reset(); combsR[i].reset() }
+        for i in apL.indices { apL[i].reset(); apR[i].reset() }
+    }
+
+    /// room 0..1 → comb feedback 0.70..0.98 (larger = longer tail); damp 0..1 → HF damping.
+    func setParams(room: Double, damp: Double) {
+        let fb = max(0.0, min(0.98, room * 0.28 + 0.70))
+        let d = max(0.0, min(0.95, damp))
+        for i in combsL.indices {
+            combsL[i].feedback = fb; combsL[i].setDamp(d)
+            combsR[i].feedback = fb; combsR[i].setDamp(d)
+        }
+    }
+
+    @inline(__always) func process(_ inL: Double, _ inR: Double) -> (Double, Double) {
+        let inputL = inL * FreeverbWash.fixedGain
+        let inputR = inR * FreeverbWash.fixedGain
+        var outL = 0.0, outR = 0.0
+        for i in combsL.indices { outL += combsL[i].process(inputL); outR += combsR[i].process(inputR) }
+        for i in apL.indices { outL = apL[i].process(outL); outR = apR[i].process(outR) }
+        return (outL, outR)
+    }
+}
+
 /// A native "Moondrone voice model" that ports the most important sound-design behavior
 /// from the Tone.js engine (src/droneEngine.js + soundTuning.js) as closely as practical:
 ///
@@ -367,33 +457,58 @@ final class NativeDroneEngine {
         let breathNoiseScale: Double
         let lowMidFreq: Double
         let lowMidGainDb: Double
+        let stereoWidth: Double       // mid/side spread of the panned voices (presetStereoWidth)
+        let voicePan: [Double]        // per-layer pan (±), length bankSize (presetVoicePan)
+        let washWet: Double           // reverb wet mix (from PRESETS.reverb.wet, native-safe)
+        let washRoom: Double          // reverb room size 0..1 (from PRESETS.reverb.decay)
     }
     private static let presets: [String: PresetDef] = [
-        "Pure": PresetDef(voiceGains: [0.06, 0.21, 0.003, 0.085, 0.014, 0.005],
+        // Pure/Mimas — very root-centered, near-sine: quiet −12 body, almost no fifth, gentle
+        // +12 float, spacious/clean (not organ). Slight clean spread + generous clean space.
+        "Pure": PresetDef(voiceGains: [0.05, 0.225, 0.002, 0.07, 0.01, 0.003],
                           filterBaseHz: 2280, foundationGain: 0, isCosmos: false,
-                          breathAmountScale: 0.58, breathNoiseScale: 0.48,
-                          lowMidFreq: 520, lowMidGainDb: -1.55),
-        "Shruti": PresetDef(voiceGains: [0.056, 0.33, 0.11, 0.022, 0.048, 0.014],
-                            filterBaseHz: 850, foundationGain: 0.44, isCosmos: false,
+                          breathAmountScale: 0.58, breathNoiseScale: 0.55,
+                          lowMidFreq: 520, lowMidGainDb: -1.55,
+                          stereoWidth: 0.42, voicePan: [-0.14, 0.06, 0, 0.11, 0, 0, 0, 0, 0, 0],
+                          washWet: 0.20, washRoom: 0.82),
+        // Shruti/Europa — tanpura/shruti-box: strong root + audible fifth, hollow low-mid, some
+        // upper-octave shimmer, foundation root that supports but does not boom. Moderate room.
+        "Shruti": PresetDef(voiceGains: [0.052, 0.34, 0.135, 0.02, 0.05, 0.014],
+                            filterBaseHz: 850, foundationGain: 0.40, isCosmos: false,
                             breathAmountScale: 1.0, breathNoiseScale: 1.0,
-                            lowMidFreq: 420, lowMidGainDb: -1.25),
-        "Strings": PresetDef(voiceGains: [0.19, 0.36, 0.10, 0.015, 0.015, 0.01],
+                            lowMidFreq: 420, lowMidGainDb: -1.25,
+                            stereoWidth: 0.44, voicePan: [-0.14, 0, 0.12, 0, 0.20, 0, 0, 0, 0, 0],
+                            washWet: 0.17, washRoom: 0.60),
+        // Strings/Titan — richness reference: detuned saw ensemble on the body layers (rendered
+        // below), warm/wide pad body, a touch more upper harmonic for air (not buzzy). Warm room.
+        "Strings": PresetDef(voiceGains: [0.185, 0.36, 0.115, 0.03, 0.022, 0.012],
                              filterBaseHz: 4200, foundationGain: 0, isCosmos: false,
-                             breathAmountScale: 1.0, breathNoiseScale: 0.36,
-                             lowMidFreq: 300, lowMidGainDb: -1.15),
-        "Cosmos": PresetDef(voiceGains: [0.038, 0.25, 0.14, 0.24, 0.29, 0.14],
-                            filterBaseHz: 420, foundationGain: 0.54, isCosmos: true,
-                            breathAmountScale: 1.0, breathNoiseScale: 0.92,
-                            lowMidFreq: 300, lowMidGainDb: -1.15),
+                             breathAmountScale: 1.0, breathNoiseScale: 0.42,
+                             lowMidFreq: 300, lowMidGainDb: -1.15,
+                             stereoWidth: 0.46, voicePan: [-0.10, 0, 0.05, 0.08, 0.14, 0, 0, 0, 0, 0],
+                             washWet: 0.19, washRoom: 0.64),
+        // Cosmos/Io — darker base but airy top: lighter root, more celestial +36/+48 sky presence,
+        // widest layers, biggest/airiest space. Sky gains raised so the shimmer is clearly audible.
+        "Cosmos": PresetDef(voiceGains: [0.036, 0.215, 0.13, 0.24, 0.30, 0.15],
+                            filterBaseHz: 420, foundationGain: 0.52, isCosmos: true,
+                            breathAmountScale: 1.0, breathNoiseScale: 0.96,
+                            lowMidFreq: 300, lowMidGainDb: -1.15,
+                            stereoWidth: 0.55,
+                            voicePan: [-0.18, 0, 0.10, -0.12, 0.16, 0.22, 0, -0.30, 0.30, 0.42],
+                            washWet: 0.34, washRoom: 0.90),
+        // Binaural — real L/R beat pair; near-mono voice bed + restrained wash so the beat stays
+        // clear (its own L/R carriers provide the width, not the mid/side pan or a big tail).
         "Binaural": PresetDef(voiceGains: [0.048, 0.35, 0.14, 0.13, 0.078, 0.034],
                               filterBaseHz: 385, foundationGain: 0, isCosmos: false,
                               breathAmountScale: 1.0, breathNoiseScale: 0.0,
-                              lowMidFreq: 360, lowMidGainDb: -1.45),
+                              lowMidFreq: 360, lowMidGainDb: -1.45,
+                              stereoWidth: 0.06, voicePan: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                              washWet: 0.10, washRoom: 0.52),
     ]
-    // Cosmos sky layer gains — COSMOS_EXTENSION_GAINS (phone-speaker effective).
-    private static let cosmosCelestialGain = 0.055
-    private static let cosmosSkyRootGain = 0.034
-    private static let cosmosSkyOctaveGain = 0.032
+    // Cosmos sky layer gains — COSMOS_EXTENSION_GAINS, raised for clearly audible celestial air.
+    private static let cosmosCelestialGain = 0.085
+    private static let cosmosSkyRootGain = 0.055
+    private static let cosmosSkyOctaveGain = 0.050
 
     private let engine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode?
@@ -444,6 +559,7 @@ final class NativeDroneEngine {
     // layer (0 low-oct, 1 root, 2 fifth) plus a very slow drift LFO → a chorused string
     // timbre with saw-ish harmonics. Idle (never summed) for every other preset.
     private var stringsDetunePhase = [Double](repeating: 0, count: bankSize)
+    private var stringsDetunePhase2 = [Double](repeating: 0, count: bankSize)
     private var stringsDriftPhase = 0.0
 
     // Mood (slow, timbral-only motion — moods.js). Never applied for Binaural. Uses two
@@ -533,6 +649,20 @@ final class NativeDroneEngine {
     private var curLowMidGainDb = -1.25
     private var curBreathNoiseScale = 1.0
 
+    // ---- Stereo width / panning + space wash --------------------------------
+    private var pWidth = 0.44                 // preset mid/side width
+    private var pPan = [Double](repeating: 0, count: bankSize)  // per-layer pan (±)
+    private let wash = FreeverbWash()
+    private var targetWashWet = 0.17, curWashWet = 0.17         // reverb wet mix (smoothed)
+    private var targetWashRoom = 0.60, curWashRoom = 0.60       // reverb room size (smoothed)
+    private var sideLp = 0.0                  // gentle LP on the side signal (tames pan sizzle)
+
+    // ---- Mood orbit pair (dedicated oscillators, separate from the voice bank). Blue/Blood/
+    // Super/Full get a slow symmetric detune pair centred on a musical interval → shimmer/beating
+    // with the pitch centre held. Off for New and Binaural. ----
+    private var orbitPhaseA = 0.0, orbitPhaseB = 0.0
+    private var orbitDriftPhase = 0.0
+
     // Debug snapshot values written on the render thread (benign race on read).
     private var dbgBreathPhase = 0.0
     private var dbgBreathAmount = 0.0
@@ -540,6 +670,11 @@ final class NativeDroneEngine {
     private var dbgIntensityFilterMult = 1.0
     private var dbgIntensityResonance = 0.0
     private var dbgLowEndScale = 1.0
+    private var dbgMoodBloomDb = 0.0
+    private var dbgMoodEclipseDb = 0.0
+    private var dbgMoodBright = 1.0
+    private var dbgMoodDetuneCents = 0.0
+    private var dbgMoodOrbitActive = false
 
     init() {
         setPreset("Shruti")
@@ -611,7 +746,7 @@ final class NativeDroneEngine {
         noiseHp = 0.0; noiseLp = 0.0
         bassShelf.reset(); midScoop.reset(); lowMidScoop.reset(); airShelf.reset()
         moodShelf.reset(); moodNotch.reset(); resonancePeak.reset()
-        for i in 0..<NativeDroneEngine.bankSize { stringsDetunePhase[i] = 0.0 }
+        for i in 0..<NativeDroneEngine.bankSize { stringsDetunePhase[i] = 0.0; stringsDetunePhase2[i] = 0.0 }
 
         // Snap the transition / morph state to a clean idle at cold start, and snap the smoothed
         // register + preset filter scalars to their configured values so the first buffer is
@@ -626,6 +761,11 @@ final class NativeDroneEngine {
         curLowMidFreq = pLowMidFreq
         curLowMidGainDb = pLowMidGainDb
         curBreathNoiseScale = pBreathNoiseScale
+        curWashWet = targetWashWet
+        curWashRoom = targetWashRoom
+        sideLp = 0.0
+        orbitPhaseA = 0.0; orbitPhaseB = 0.0; orbitDriftPhase = 0.0
+        wash.reset()
 
         let twoPi = 2.0 * Double.pi
         let sr = sampleRate
@@ -656,6 +796,11 @@ final class NativeDroneEngine {
             self.curLowMidFreq += (self.pLowMidFreq - self.curLowMidFreq) * presetBufCoeff
             self.curLowMidGainDb += (self.pLowMidGainDb - self.curLowMidGainDb) * presetBufCoeff
             self.curBreathNoiseScale += (self.pBreathNoiseScale - self.curBreathNoiseScale) * presetBufCoeff
+            // Space wash wet/room glide so a moon change crossfades the reverb size (the tail
+            // itself decays naturally); then push the (smoothed) room into the wash network.
+            self.curWashWet += (self.targetWashWet - self.curWashWet) * presetBufCoeff
+            self.curWashRoom += (self.targetWashRoom - self.curWashRoom) * presetBufCoeff
+            self.wash.setParams(room: self.curWashRoom, damp: 0.28)
 
             self.bassShelf.setLowShelf(210, 0.7, -4.5, sr)          // SPEAKER_SAFETY bass shelf
             self.midScoop.setPeaking(600, 0.38, -1.8, sr)           // mid voicing
@@ -703,39 +848,55 @@ final class NativeDroneEngine {
             self.dbgIntensityFilterMult = self.intensityFilterMult(Double(self.currentIntensity))
             self.dbgIntensityResonance = min(1.0, max(0.0, (Double(self.currentIntensity) - 0.62) / 0.38))
 
-            // ---- Mood: very slow timbral motion (moods.js). Skipped for Binaural. ----
-            // Advance the mood clock once per buffer (control rate). Motion is purely
-            // spectral (bloom shelf + eclipse notch) + a capped upper-layer detune drift —
-            // deliberately NO amplitude/tremolo cycling.
+            // ---- Mood: slow timbral motion (moods.js) with an IMMEDIATE static identity. ----
+            // Each phase has a constant character (brightness / bloom baseline / width / eclipse
+            // / orbit) that reads within a second or two, PLUS very slow sinusoidal motion that
+            // unfolds over long cycles. Purely spectral + detune + width + orbit — never amplitude
+            // tremolo, and the root pitch centre stays fixed. Skipped for Binaural.
             self.moodElapsed += Double(frameCount) / sr
-            var moodBloomDb = 0.0
+            var moodBloomDb = 0.0          // total high-shelf gain (static base + slow swing)
             var moodEclipseDb = 0.0
             var moodEclipseHz = 1200.0
-            var moodBright = 1.0
-            var moodDetuneCents = 0.0
+            var moodBright = 1.0           // filter-cutoff tilt (static identity)
+            var moodDetuneCents = 0.0      // capped upper-layer drift
+            var moodWidthAdd = 0.0         // extra mid/side width (static + slow)
+            var orbitGain = 0.0            // dedicated orbit pair level (0 = off)
+            var orbitSemitone = 12.0       // orbit centre above root
+            var orbitMaxCents = 0.0        // peak symmetric detune
+            var orbitPeriodSec = 120.0     // orbit convergence/divergence cycle
             if !custom && !beatActive {
                 let t = self.moodElapsed
                 switch self.moodName {
-                case "new":   // near-still reference
-                    moodDetuneCents = 0.6 * sin(twoPi * t / 80.0)
-                case "full":  // slow warm bloom
-                    moodBloomDb = 3.2 * sin(twoPi * t / 184.0)
-                    moodDetuneCents = 1.4 * sin(twoPi * t / 176.0)
-                case "blue":  // spacious / cooler / wider
-                    moodBloomDb = 2.2 * sin(twoPi * t / 130.0)
-                    moodBright = 0.9
+                case "new":   // near-still reference: sub-musical epsilon drift only
+                    moodBright = 0.99
+                    moodDetuneCents = 0.5 * sin(twoPi * t / 80.0)
+                case "full":  // warm bloom + gentle octave orbit
+                    moodBloomDb = 1.6 + 3.7 * sin(twoPi * t / 184.0)
+                    moodBright = 1.03
+                    moodWidthAdd = 0.05
+                    moodDetuneCents = 1.6 * sin(twoPi * t / 176.0)
+                    orbitGain = 0.030; orbitSemitone = 12; orbitMaxCents = 2.5; orbitPeriodSec = 240
+                case "blue":  // cooler / distant / widest + soft minor-7th orbit color
+                    moodBloomDb = -1.4 + 2.4 * sin(twoPi * t / 130.0)
+                    moodBright = 0.86
+                    moodWidthAdd = 0.30
                     moodDetuneCents = 3.0 * sin(twoPi * t / 96.0)
-                case "blood": // darker + slow sweeping eclipse shadow
-                    moodBloomDb = 2.4 * sin(twoPi * t / 60.0)
+                    orbitGain = 0.050; orbitSemitone = 10; orbitMaxCents = 22; orbitPeriodSec = 96
+                case "blood": // darker/deeper: constant eclipse shadow + sweeping notch + fifth orbit
+                    moodBloomDb = -0.8 + 2.6 * sin(twoPi * t / 60.0)
+                    moodBright = 0.76
+                    moodWidthAdd = 0.16
                     let sweep = 0.5 + 0.5 * sin(twoPi * t / 48.0)
-                    moodEclipseDb = -10.5 * sweep
+                    moodEclipseDb = -(4.5 + 6.5 * sweep)   // constant shadow + sweep (always present)
                     moodEclipseHz = 700.0 + (2300.0 - 700.0) * sweep
-                    moodBright = 0.82
                     moodDetuneCents = 4.0 * sin(twoPi * t / 54.0)
-                case "super": // brightest / most radiant
-                    moodBloomDb = 4.0 * sin(twoPi * t / 64.0)
-                    moodBright = 1.12
+                    orbitGain = 0.090; orbitSemitone = 7; orbitMaxCents = 52; orbitPeriodSec = 28
+                case "super": // brightest / largest / radiant: strong air + wide + octave orbit
+                    moodBloomDb = 2.2 + 4.3 * sin(twoPi * t / 64.0)
+                    moodBright = 1.16
+                    moodWidthAdd = 0.27
                     moodDetuneCents = 2.5 * sin(twoPi * t / 70.0)
+                    orbitGain = 0.072; orbitSemitone = 12; orbitMaxCents = 38; orbitPeriodSec = 36
                 default:
                     break
                 }
@@ -745,10 +906,31 @@ final class NativeDroneEngine {
             // Cap upper-layer detune (root/fifth stay fixed) and precompute the factor.
             let moodDetuneFactor = pow(2.0, max(-6.0, min(6.0, moodDetuneCents)) / 1200.0)
 
+            // Effective mid/side width = preset width + mood width, safety-capped.
+            let effWidth = max(0.0, min(0.85, self.pWidth + moodWidthAdd))
+
+            // ---- Orbit pair precompute (per buffer): symmetric detune around a musical centre,
+            // slowly sweeping so the beat rate swells/eases. Level low + panned opposite. ----
+            self.orbitDriftPhase += twoPi * (Double(frameCount) / sr) / orbitPeriodSec
+            if self.orbitDriftPhase > twoPi { self.orbitDriftPhase -= twoPi }
+            let orbitCenterHz = self.currentRootHz * pow(2.0, orbitSemitone / 12.0)
+            let orbitSweep = 0.5 + 0.5 * sin(self.orbitDriftPhase)
+            let orbitCents = orbitMaxCents * orbitSweep
+            let orbitFreqA = orbitCenterHz * pow(2.0, orbitCents / 1200.0)
+            let orbitFreqB = orbitCenterHz * pow(2.0, -orbitCents / 1200.0)
+
             // ---- Strings detuned-ensemble drift (Strings only). ----
             self.stringsDriftPhase += twoPi * (Double(frameCount) / sr) / 30.0  // ~30 s drift
             if self.stringsDriftPhase > twoPi { self.stringsDriftPhase -= twoPi }
-            let stringsDetuneFactor = pow(2.0, (2.6 + 1.0 * sin(self.stringsDriftPhase)) / 1200.0)
+            let stringsDetuneFactor = pow(2.0, (3.4 + 1.4 * sin(self.stringsDriftPhase)) / 1200.0)
+            let stringsDetuneFactor2 = pow(2.0, -(3.0 + 1.2 * sin(self.stringsDriftPhase * 0.7 + 1.3)) / 1200.0)
+
+            // Mood debug (control-rate).
+            self.dbgMoodBloomDb = moodBloomDb
+            self.dbgMoodEclipseDb = moodEclipseDb
+            self.dbgMoodBright = moodBright
+            self.dbgMoodDetuneCents = moodDetuneCents
+            self.dbgMoodOrbitActive = orbitGain > 0.0
 
             // ---- Intensity resonance (gentle Q rise above ~62%). Cutoff follows the neutral
             // intensity multiplier (0.48×–1.78× preset base), biased by smoothed register
@@ -820,7 +1002,8 @@ final class NativeDroneEngine {
                     gc = self.gainCoeff
                 }
 
-                var mix = 0.0
+                var mix = 0.0     // mono sum (fed to the mono tone chain)
+                var side = 0.0    // pan-weighted difference (mid/side stereo width)
                 for i in 0..<count {
                     let targetRatio = custom ? self.scratchPending[i] : self.targetRatios[i]
                     let targetGain = custom ? Double(self.scratchRequested[i]) : self.targetGains[i]
@@ -841,15 +1024,22 @@ final class NativeDroneEngine {
                     if self.phases[i] > twoPi { self.phases[i] -= twoPi }
 
                     var osc: Double
-                    if isStrings && i <= 2 {
-                        // Detuned saw ensemble on the principle body layers → chorused strings.
+                    if isStrings && i <= 3 {
+                        // Richer detuned saw ensemble on the body layers (main + two opposing
+                        // detuned partners) → a warm, wide, chorused string pad.
                         self.stringsDetunePhase[i] += twoPi * (self.currentRootHz * self.activeRatios[i] * stringsDetuneFactor) / sr
                         if self.stringsDetunePhase[i] > twoPi { self.stringsDetunePhase[i] -= twoPi }
-                        osc = 0.6 * self.sawApprox(self.phases[i]) + 0.4 * self.sawApprox(self.stringsDetunePhase[i])
+                        self.stringsDetunePhase2[i] += twoPi * (self.currentRootHz * self.activeRatios[i] * stringsDetuneFactor2) / sr
+                        if self.stringsDetunePhase2[i] > twoPi { self.stringsDetunePhase2[i] -= twoPi }
+                        osc = 0.5 * self.sawApprox(self.phases[i])
+                            + 0.3 * self.sawApprox(self.stringsDetunePhase[i])
+                            + 0.3 * self.sawApprox(self.stringsDetunePhase2[i])
                     } else {
                         osc = sin(self.phases[i])
                     }
-                    mix += osc * self.currentGains[i]
+                    let v = osc * self.currentGains[i]
+                    mix += v
+                    if !custom { side += v * self.pPan[i] }   // pan → stereo difference
                 }
 
                 // Air/wind: white noise → HP ~1.1 kHz → LP ~5 kHz → breath swell.
@@ -881,14 +1071,29 @@ final class NativeDroneEngine {
                 let lpAlpha = w / (1.0 + w)
                 self.lpState += lpAlpha * (x - self.lpState)
 
-                // DC-block high-pass (~3–4 Hz).
+                // DC-block high-pass (~3–4 Hz) on the mono body.
                 let dcOut = self.lpState - self.dcPrevIn + 0.9995 * self.dcPrevOut
                 self.dcPrevIn = self.lpState
                 self.dcPrevOut = dcOut
 
+                // ---- Mid/side stereo: pan-weighted difference spreads voices across the field.
+                self.sideLp += 0.6 * (side - self.sideLp)   // light LP tames pan sizzle (saws)
+                let sideW = self.sideLp * effWidth
+                var left = dcOut - sideW
+                var right = dcOut + sideW
+
+                // ---- Mood orbit pair: symmetric detuned oscillators panned opposite → slow
+                // shimmer/beating with the pitch centre held (added pre-wash so it gets space).
+                if orbitGain > 0.0 {
+                    self.orbitPhaseA += twoPi * orbitFreqA / sr
+                    self.orbitPhaseB += twoPi * orbitFreqB / sr
+                    if self.orbitPhaseA > twoPi { self.orbitPhaseA -= twoPi }
+                    if self.orbitPhaseB > twoPi { self.orbitPhaseB -= twoPi }
+                    left += sin(self.orbitPhaseA) * orbitGain
+                    right += sin(self.orbitPhaseB) * orbitGain
+                }
+
                 // Real binaural beat: separate L/R carriers split around the root by beat Hz.
-                var left = dcOut
-                var right = dcOut
                 if beatActive && self.currentBinauralBeatHz > 0.01 {
                     let half = self.currentBinauralBeatHz * 0.5
                     self.binPhaseL += twoPi * (self.currentRootHz - half) / sr
@@ -899,10 +1104,20 @@ final class NativeDroneEngine {
                     right += sin(self.binPhaseR) * 0.16
                 }
 
-                // Note-change dip: the whole voice bed (incl. binaural carriers) fades to the
-                // quiet point and back so key/register changes are a musical gesture, not a jump.
+                // Note-change dip on the DRY bed only: the reverb tail keeps ringing across the
+                // retune (a musical bridge), while the dry voices dip to the quiet point + back.
                 left *= self.transitionGain
                 right *= self.transitionGain
+
+                // ---- Space wash: diffuse stereo reverb, wet-mixed on top of the dry bed. The
+                // dry path keeps its own DC block; the master tanh limiter downstream is the
+                // clip safety for dry + wet combined.
+                let (wetL, wetR) = self.wash.process(left, right)
+                // washMakeup compensates for Freeverb's conservative internal scale so the wet
+                // reads as a real pad space at the per-preset wet fractions; tanh limits below.
+                let wetGain = self.curWashWet * 2.6
+                left += wetL * wetGain
+                right += wetR * wetGain
 
                 // Master: smoothed register trim + makeup gain + tanh soft-clip limiter.
                 let drive = Double(self.currentVolume) * 1.68 * 1.1 * self.curRegTrim
@@ -1121,6 +1336,10 @@ final class NativeDroneEngine {
         pBreathNoiseScale = def.breathNoiseScale
         pLowMidFreq = def.lowMidFreq
         pLowMidGainDb = def.lowMidGainDb
+        pWidth = def.stereoWidth
+        pPan = def.voicePan
+        targetWashWet = def.washWet
+        targetWashRoom = def.washRoom
         // Per-preset intensity compression (PRESET_INTENSITY_TUNING).
         pSoftCeilingUi = 0.0; pAboveCeilingContribution = 0.25; pAmountScale = 1.0
         pUpperKneeUi = 0.0; pUpperMaxEffectiveUi = 0.67; pUpperCompressionPower = 2.4
@@ -1190,6 +1409,19 @@ final class NativeDroneEngine {
             "intensityFilterMultiplier": dbgIntensityFilterMult,
             "intensityResonance": dbgIntensityResonance,
             "lowEndScale": dbgLowEndScale,
+            // ---- Space wash + mood/phase character ----
+            "spaceMode": "freeverb-stereo",
+            "reverbMode": "freeverb-stereo",
+            "washAmount": curWashWet,
+            "spaceWet": curWashWet,
+            "washRoom": curWashRoom,
+            "stereoWidth": pWidth,
+            "moodBloomDb": dbgMoodBloomDb,
+            "moodEclipseDb": dbgMoodEclipseDb,
+            "moodBrightness": dbgMoodBright,
+            "moodDetuneCents": dbgMoodDetuneCents,
+            "moodOrbitActive": dbgMoodOrbitActive,
+            "presetVoiceCount": 6 + (pFoundationGain > 0 ? 1 : 0) + (pIsCosmos ? 3 : 0),
         ]
     }
 }
