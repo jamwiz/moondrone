@@ -7,6 +7,7 @@ import { isPrimerPlaying, pausePrimer } from './iosMediaPrimer'
 import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
 import { msSinceUserAudioAction } from './audioActivity'
 import { ENABLE_IOS_BACKGROUND_AUDIO } from './backgroundAudioConfig'
+import { isNativeModeEnabled, nativeModeSnapshot } from './nativeModeBridge'
 
 // Snapshot used by every lifecycle diagnostic so the debug panel can show what the app saw at
 // each background/foreground transition.
@@ -134,6 +135,45 @@ function handleResumeHealthCheck(source) {
   audioDiag('lifecycle', 'resume prewarm skipped — waiting for user Play', { source })
 }
 
+// Native Mode resume: reconcile the UI with the live native engine. Native audio may have kept
+// playing across background/lock, so if the snapshot says the engine is running, show playing
+// (and mirror the native metronome). Otherwise leave the UI stopped honestly.
+async function rehydrateNativeUi(setIsPlaying, setIsMetronomePlaying, source) {
+  if (!isNativeModeEnabled()) {
+    return
+  }
+
+  const snap = await nativeModeSnapshot()
+  // Drone "playing" = the user's drone is active (droneUserActive), NOT merely the engine kept
+  // alive silently for a metronome-only session. Fall back to isRunning if the field is absent.
+  const droneActive = typeof snap?.droneUserActive === 'boolean' ? snap.droneUserActive : Boolean(snap?.isRunning)
+  audioDiag('lifecycle', 'native resume snapshot', {
+    source,
+    isRunning: snap?.isRunning ?? null,
+    droneUserActive: snap?.droneUserActive ?? null,
+    nativeMetronomePlaying: snap?.nativeMetronomePlaying ?? null,
+  })
+
+  if (droneActive || snap?.nativeMetronomePlaying) {
+    setIsPlaying(droneActive)
+    if (typeof snap.nativeMetronomePlaying === 'boolean') {
+      setIsMetronomePlaying(snap.nativeMetronomePlaying)
+    }
+    audioDiag('lifecycle', 'native UI rehydrated from running engine', {
+      source,
+      isPlaying: droneActive,
+      metronomePlaying: snap?.nativeMetronomePlaying ?? false,
+    })
+  } else {
+    setIsPlaying(false)
+    setIsMetronomePlaying(false)
+    audioDiag('lifecycle', 'native UI left stopped — engine not running', {
+      source,
+      snapshotAvailable: snap != null,
+    })
+  }
+}
+
 function logBackgroundAudioResume(source, details) {
   if (!BACKGROUND_AUDIO_RESUME_DEBUG) {
     return
@@ -205,7 +245,20 @@ async function attemptForegroundResume(source, uiIsPlaying, uiIsMetronomePlaying
   }
 }
 
+// Native Mode background/lock: the native Swift engine has its own `.playback` session + audio
+// background mode, so it keeps playing while backgrounded. The old Tone lifecycle stop would set
+// the UI to not-playing (a mismatch on return) even though native audio never stopped. In Native
+// Mode we therefore SKIP the Tone stop entirely (nothing Tone is playing) and keep the UI honest;
+// on resume `rehydrateNativeUi` reconciles the UI with the live native snapshot. Normal-mode
+// (Native Mode OFF) behavior is completely unchanged.
 function stopPlaybackForLifecycle(setIsPlaying, setIsMetronomePlaying, source) {
+  if (isNativeModeEnabled()) {
+    audioDiag('lifecycle', 'native-mode background — native audio + UI preserved (Tone stop skipped)', {
+      source,
+    })
+    return
+  }
+
   audioDiag('lifecycle', 'background audio disabled — stopping playback', lifecycleSnapshot({ source }))
 
   // Graceful declick + clean teardown (NOT a hard reset). Engine reflects stopped intent
@@ -274,6 +327,7 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
       }
 
       audioDiag('lifecycle', 'visibilitychange → visible', lifecycleSnapshot())
+      void rehydrateNativeUi(setIsPlaying, setIsMetronomePlaying, 'visibilitychange-visible')
       void attemptForegroundResume('visibilitychange-visible', uiIsPlaying, uiIsMetronomePlaying)
     }
 
@@ -338,6 +392,8 @@ export function useAppLifecycle(setIsPlaying, setIsMetronomePlaying, uiIsPlaying
           }
 
           audioDiag('lifecycle', 'app resume / active', lifecycleSnapshot())
+          // Native Mode: reconcile UI with the still-running native engine (audio survived bg).
+          void rehydrateNativeUi(setIsPlaying, setIsMetronomePlaying, 'appStateChange-active')
           // If a willResignActive pre-mute ducked audio but no real background stop followed
           // (transient resign — Control Center, banner), ramp it back up. No-op after a real stop.
           droneEngine.restoreFromBackgroundPreMute?.('appStateChange-active')

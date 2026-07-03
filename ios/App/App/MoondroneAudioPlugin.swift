@@ -636,9 +636,9 @@ final class NativeDroneEngine {
     private var gainMorphFramesRemaining = 0
     private var lastTransitionKind = "none"  // note | register | preset | glide | none (debug)
 
-    // Register-derived scalars smoothed over ~1.0 s so octave/register changes morph the output
-    // trim + filter brightness musically (voicing gains morph via the voice crossfade above).
-    private lazy var regCoeff = 1.0 - exp(-1.0 / (1.0 * sampleRate))
+    // Register-derived scalars smoothed over ~1.5 s so octave/register changes morph the output
+    // trim + filter brightness in step with the register deck crossfade (~1.55 s) — not faster.
+    private lazy var regCoeff = 1.0 - exp(-1.0 / (1.5 * sampleRate))
     private var curRegTrim = 1.0
     private var curRegBright = 1.0
 
@@ -686,9 +686,13 @@ final class NativeDroneEngine {
     private var xfBeatActive = false
     private var xfBinBeatHz = 0.0
     private var xfBinPhaseL = 0.0, xfBinPhaseR = 0.0
+    // Binaural beat-pair fade: switching a preset to/from Binaural ramps this 0↔1 over the preset
+    // window so the L/R carriers fade in/out (no instant carrier on/off → no clip/pop). Authority
+    // for whether the carriers sound; the voice bank + wash + width morph via their own smoothing.
+    private var curBeatMix = 0.0
     private var registerChangePending = false   // set by setRegister → next changeNote uses reg timing
-    private lazy var noteXfadeFrames = Int(0.90 * sampleRate)      // key change overlap ~0.90 s
-    private lazy var registerXfadeFrames = Int(1.10 * sampleRate)  // register change overlap ~1.10 s
+    private lazy var noteXfadeFrames = Int(1.30 * sampleRate)      // key change overlap ~1.30 s
+    private lazy var registerXfadeFrames = Int(1.55 * sampleRate)  // register change overlap ~1.55 s
 
     // ---- Smoothed preset scalars (glided so a moon change never snaps pan/width/timbre) ------
     private var curWidth = 0.44                                   // smoothed mid/side width
@@ -723,7 +727,7 @@ final class NativeDroneEngine {
     private var metRestartPending = false
     private var metStartedEngine = false      // true if the metronome (not the drone) started the engine
     private var metBpm = 100.0
-    private var metMeter = 4                   // beats per bar; 0 = straight (no accent)
+    private var metMeter = 0                    // 0 = straight (no accent) default; 2…6 = beats/bar
     private var metSoundMode = "wood"
     private var metBeatIndex = 0
     private var metFramesToNext = 0
@@ -844,6 +848,7 @@ final class NativeDroneEngine {
         curWidth = pWidth
         for i in 0..<NativeDroneEngine.bankSize { curPan[i] = pPan[i] }
         curStringsMix = (presetName == "Strings") ? 1.0 : 0.0
+        curBeatMix = (presetName == "Binaural") ? 1.0 : 0.0
         // Reset the pitch crossfade deck to idle (a cold start never crossfades).
         xfActive = false; xfArmPending = false; xfProgress = 0.0
         registerChangePending = false
@@ -892,6 +897,9 @@ final class NativeDroneEngine {
             self.curWidth += (self.pWidth - self.curWidth) * presetBufCoeff
             let stringsTargetMix = (self.presetName == "Strings") ? 1.0 : 0.0
             self.curStringsMix += (stringsTargetMix - self.curStringsMix) * presetBufCoeff
+            // Binaural carrier fade: ramp in/out over the preset window (to/from Binaural).
+            let beatTargetMix = (self.presetName == "Binaural") ? 1.0 : 0.0
+            self.curBeatMix += (beatTargetMix - self.curBeatMix) * presetBufCoeff
             if !custom {
                 for i in 0..<NativeDroneEngine.bankSize {
                     self.curPan[i] += (self.pPan[i] - self.curPan[i]) * presetBufCoeff
@@ -1282,26 +1290,27 @@ final class NativeDroneEngine {
                     right += sin(self.orbitPhaseB) * orbitGainSm
                 }
 
-                // Real binaural beat: separate L/R carriers split around the root by beat Hz. On a
-                // key change the incoming carriers fade in (xfIn) while the frozen outgoing carriers
-                // (old pitch) fade out (xfOut) — a smooth beat-pair crossfade, no hard cut.
-                if beatActive && self.currentBinauralBeatHz > 0.01 {
+                // Real binaural beat: separate L/R carriers split around the root by beat Hz. Level
+                // is gated by curBeatMix (smoothly ramps to/from Binaural — no instant carrier on/off,
+                // so switching moon to/from Binaural has no clip/pop). On a key change the incoming
+                // carriers also fade in (xfIn) while the frozen outgoing carriers fade out (xfOut).
+                if self.curBeatMix > 0.0005 {
                     let half = self.currentBinauralBeatHz * 0.5
                     self.binPhaseL += twoPi * (self.currentRootHz - half) / sr
                     self.binPhaseR += twoPi * (self.currentRootHz + half) / sr
                     if self.binPhaseL > twoPi { self.binPhaseL -= twoPi }
                     if self.binPhaseR > twoPi { self.binPhaseR -= twoPi }
-                    left += sin(self.binPhaseL) * 0.16 * xfIn
-                    right += sin(self.binPhaseR) * 0.16 * xfIn
+                    left += sin(self.binPhaseL) * 0.16 * xfIn * self.curBeatMix
+                    right += sin(self.binPhaseR) * 0.16 * xfIn * self.curBeatMix
                 }
-                if self.xfActive && self.xfBeatActive && self.xfBinBeatHz > 0.01 {
+                if self.xfActive && self.xfBeatActive && self.curBeatMix > 0.0005 {
                     let halfO = self.xfBinBeatHz * 0.5
                     self.xfBinPhaseL += twoPi * (self.xfRootHz - halfO) / sr
                     self.xfBinPhaseR += twoPi * (self.xfRootHz + halfO) / sr
                     if self.xfBinPhaseL > twoPi { self.xfBinPhaseL -= twoPi }
                     if self.xfBinPhaseR > twoPi { self.xfBinPhaseR -= twoPi }
-                    left += sin(self.xfBinPhaseL) * 0.16 * xfOut
-                    right += sin(self.xfBinPhaseR) * 0.16 * xfOut
+                    left += sin(self.xfBinPhaseL) * 0.16 * xfOut * self.curBeatMix
+                    right += sin(self.xfBinPhaseR) * 0.16 * xfOut * self.curBeatMix
                 }
 
                 // Note-change dip on the DRY bed only: the reverb tail keeps ringing across the
@@ -1700,6 +1709,8 @@ final class NativeDroneEngine {
     func snapshot() -> [String: Any] {
         return [
             "isRunning": isRunning,
+            // Drone is user-playing (not just the engine kept alive silently for the metronome).
+            "droneUserActive": isRunning && !metStartedEngine,
             "mode": useCustomPartials ? "customPartials" : "voiceModel",
             "preset": presetName,
             "octave": currentOctave,
@@ -1777,6 +1788,7 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setNativeDroneMood", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "configureAndStartNativeDrone", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "reassertNativeDrone", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getNativeDroneSnapshot", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "startNativeMetronome", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "stopNativeMetronome", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setNativeMetronomeBpm", returnType: CAPPluginReturnPromise),
@@ -1960,11 +1972,20 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
         }
     }
 
+    /// Read-only engine snapshot (no side effects). Used by lifecycle resume in Native Mode to
+    /// rehydrate the UI (isRunning / metronome) after a background/lock instead of leaving it
+    /// stopped — the native audio graph keeps playing through background on its own session.
+    @objc func getNativeDroneSnapshot(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            call.resolve(self.drone.snapshot())
+        }
+    }
+
     // ---- Native metronome (Native Mode only) — no Tone/WebAudio/media-primer. ----
     @objc func startNativeMetronome(_ call: CAPPluginCall) {
         let bpm = call.getDouble("bpm") ?? 100.0
-        // JS passes meter as an Int: 0 = straight (no accent), 2…6 = beats per bar.
-        let meter = call.getInt("meter") ?? 4
+        // JS passes meter as an Int: 0 = straight (no accent, Native Mode default), 2…6 = beats/bar.
+        let meter = call.getInt("meter") ?? 0
         let soundMode = call.getString("soundMode") ?? "wood"
         DispatchQueue.main.async {
             // Only touch the audio session if the metronome must start the engine itself (drone

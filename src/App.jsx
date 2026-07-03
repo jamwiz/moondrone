@@ -262,14 +262,12 @@ function App() {
     // approximate the moon pulse with a JS timer at the current BPM. Audio timing is owned by the
     // native engine; this visual is best-effort only.
     if (isNativeModeEnabled()) {
-      const meter = Number(DEFAULT_METRONOME_METER) || 0
+      // Native Mode metronome is straight / no accent (meter 0), so every visual pulse is a
+      // regular (non-downbeat) tick — matching the audio (no accented downbeat).
       const intervalMs = Math.max(150, Math.round(60000 / Math.max(30, metronomeBpm)))
-      setMetronomePulse((prev) => ({ tick: prev.tick + 1, downbeat: true }))
-      let beat = 1
+      setMetronomePulse((prev) => ({ tick: prev.tick + 1, downbeat: false }))
       const id = setInterval(() => {
-        const downbeat = meter >= 1 ? beat % meter === 0 : false
-        setMetronomePulse((prev) => ({ tick: prev.tick + 1, downbeat }))
-        beat = meter >= 1 ? (beat + 1) % meter : 0
+        setMetronomePulse((prev) => ({ tick: prev.tick + 1, downbeat: false }))
       }, intervalMs)
       return () => clearInterval(id)
     }
@@ -981,9 +979,12 @@ function App() {
     const startedAtMs = performance.now()
     metronomeStartPendingRef.current = true
     setMetronomePulse({ tick: 0, downbeat: false })
+    // Native Mode metronome defaults to STRAIGHT / no accent (meter 0): every click uses the same
+    // regular tone until a meter UI exists. (Native Mode OFF keeps the normal Tone meter default.)
+    const nativeMeter = 0
     audioDiag('metronome', 'native-mode NATIVE metronome path ENTERED (Swift click, no Tone/WebAudio)', {
       bpm: metronomeBpm,
-      meter: DEFAULT_METRONOME_METER,
+      meter: nativeMeter,
       soundMode: DEFAULT_METRONOME_SOUND_MODE,
       dronePlaying: isPlaying,
       primerSkipped: true,
@@ -993,7 +994,7 @@ function App() {
     try {
       const result = await nativeModeStartMetronome({
         bpm: metronomeBpm,
-        meter: DEFAULT_METRONOME_METER,
+        meter: nativeMeter,
         soundMode: DEFAULT_METRONOME_SOUND_MODE,
       })
       setIsMetronomePlaying(true)

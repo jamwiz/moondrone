@@ -49,6 +49,12 @@ export async function reassertNativeDrone() {
   return result
 }
 
+// Read-only engine snapshot (no side effects). Returns the Swift snapshot dict (isRunning, preset,
+// nativeMetronomePlaying, …). Used by lifecycle resume in Native Mode to rehydrate the UI.
+export async function getNativeDroneSnapshot() {
+  return await NativeDrone.getNativeDroneSnapshot()
+}
+
 export async function stopNativeDrone() {
   const result = await NativeDrone.stopNativeDrone()
   console.log('[NativeDrone] stopNativeDrone ->', result)
@@ -167,6 +173,7 @@ if (typeof window !== 'undefined') {
     setMood: setNativeDroneMood,
     configureAndStart: configureAndStartNativeDrone,
     reassert: reassertNativeDrone,
+    snapshot: getNativeDroneSnapshot,
     startMetronome: startNativeMetronome,
     stopMetronome: stopNativeMetronome,
     setMetronomeBpm: setNativeMetronomeBpm,

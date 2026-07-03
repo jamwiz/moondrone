@@ -21,6 +21,7 @@ import { DEFAULT_MOOD_ID } from './moods'
 import { METRONOME_STRAIGHT_METER } from './metronomeSamples'
 import {
   configureAndStartNativeDrone,
+  getNativeDroneSnapshot,
   reassertNativeDrone,
   setNativeDroneBinauralBeat,
   setNativeDroneBreath,
@@ -214,6 +215,12 @@ export function nativeModeStop() {
 // start). Fire-and-forget + error-safe; never toggles drone UI state.
 export function nativeModeReassert() {
   return safe(reassertNativeDrone())
+}
+
+// Read-only native engine snapshot (isRunning, nativeMetronomePlaying, …) or null on failure.
+// Used by lifecycle resume to rehydrate the UI when native audio survived background/lock.
+export function nativeModeSnapshot() {
+  return safe(getNativeDroneSnapshot())
 }
 
 // transition: 'note' (default) for key/octave changes → native dip+retune gesture;
