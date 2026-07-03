@@ -17,12 +17,15 @@
 
 import { Capacitor } from '@capacitor/core'
 import { BINAURAL_MODES, DEFAULT_BINAURAL_MODE_ID } from './soundTuning'
+import { DEFAULT_MOOD_ID } from './moods'
 import {
   setNativeDroneBinauralBeat,
   setNativeDroneBreath,
   setNativeDroneFrequency,
   setNativeDroneIntensity,
+  setNativeDroneMood,
   setNativeDronePreset,
+  setNativeDroneRegister,
   setNativeDroneVolume,
   startNativeDrone,
   stopNativeDrone,
@@ -86,9 +89,12 @@ export function keyOctaveToHz(key, octave, referenceA = 440) {
   return referenceA * 2 ** ((midi - 69) / 12)
 }
 
-// Moon → partial-set mapping (max 8 partials, matching the native engine). Each moon
-// gets a deliberately distinct spectrum. Still a simplification of the full Tone.js
-// voices, but voiced to feel recognizably different from each other.
+// LEGACY / DEBUG ONLY — Moon → raw partial-set mapping. This is NO LONGER the native
+// sound source: the Swift NativeDroneEngine now owns a full "Moondrone voice model"
+// (named voice layers, per-preset voiceGains, breath, air, register, mood) selected by
+// NAME via setNativeDronePreset. This table is kept only for the console POC path
+// (moondroneNativeDrone.setPartials / partialsForPreset). Safe to delete once the POC
+// buttons are removed.
 const PRESET_PARTIALS = {
   // Mimas — near-sine purity: dominant root with only a whisper of octave/twelfth sheen.
   Pure: [
@@ -130,6 +136,8 @@ const PRESET_PARTIALS = {
   ],
 }
 
+// LEGACY / DEBUG ONLY — see PRESET_PARTIALS note above. Not used by the Native Mode
+// sound path anymore (kept for the console POC).
 export function partialsForPreset(presetName) {
   return PRESET_PARTIALS[presetName] ?? PRESET_PARTIALS.Shruti
 }
@@ -162,15 +170,25 @@ function safe(promise) {
   })
 }
 
+// Register octave is passed straight through (2=Low … 5=VeryHigh); the native engine uses
+// it for register voicing in addition to the pitch encoded in rootHz.
+function safeOctave(octave) {
+  const n = Number(octave)
+  return Number.isFinite(n) ? Math.max(2, Math.min(5, Math.round(n))) : 3
+}
+
 // uiVolumePercent is 0–100; NativeDrone expects 0–1. Presets are now driven by NAME so
-// the native "Moondrone voice model" (voiceGains, breath, air, tone) does the synthesis.
-export function nativeModePlay({ key, octave, referenceA, intensity, breath, volumePercent, presetName, binauralModeId }) {
+// the native "Moondrone voice model" (voiceGains, breath, air, register, mood) does the
+// synthesis; register + mood are sent alongside so the moon matches the UI immediately.
+export function nativeModePlay({ key, octave, referenceA, intensity, breath, volumePercent, presetName, binauralModeId, moodId }) {
   const hz = keyOctaveToHz(key, octave, referenceA)
   const preset = nativePresetName(presetName)
   return safe(
     (async () => {
       await startNativeDrone(clamp01(volumePercent / 100))
       await setNativeDronePreset(preset)
+      await setNativeDroneRegister(safeOctave(octave))
+      await setNativeDroneMood(moodId ?? DEFAULT_MOOD_ID)
       await setNativeDroneBinauralBeat(beatHzForPreset(preset, binauralModeId))
       await setNativeDroneFrequency(hz)
       await setNativeDroneIntensity(clamp01(intensity / 100))
@@ -184,7 +202,20 @@ export function nativeModeStop() {
 }
 
 export function nativeModeSetFrequency(key, octave, referenceA) {
-  return safe(setNativeDroneFrequency(keyOctaveToHz(key, octave, referenceA)))
+  return safe(
+    (async () => {
+      await setNativeDroneRegister(safeOctave(octave))
+      await setNativeDroneFrequency(keyOctaveToHz(key, octave, referenceA))
+    })(),
+  )
+}
+
+export function nativeModeSetRegister(octave) {
+  return safe(setNativeDroneRegister(safeOctave(octave)))
+}
+
+export function nativeModeSetMood(moodId) {
+  return safe(setNativeDroneMood(moodId ?? DEFAULT_MOOD_ID))
 }
 
 export function nativeModeSetIntensity(uiPercent) {

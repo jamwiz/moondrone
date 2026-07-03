@@ -30,7 +30,9 @@ import {
   nativeModeSetBreath,
   nativeModeSetFrequency,
   nativeModeSetIntensity,
+  nativeModeSetMood,
   nativeModeSetPreset,
+  nativeModeSetRegister,
   nativeModeSetVolume,
   nativeModeStop,
   setNativeModeEnabled,
@@ -425,10 +427,11 @@ function App() {
           volumePercent: volume,
           presetName: selectedPresetName,
           binauralModeId,
+          moodId,
         })
         setIsPlaying(true)
         setIsDroneStarting(false)
-        audioDiag('native-mode', 'native drone play', { key: selectedKey, octave: selectedOctave, preset: selectedPresetName })
+        audioDiag('native-mode', 'native drone play', { key: selectedKey, octave: selectedOctave, preset: selectedPresetName, mood: moodId })
       } catch (error) {
         audioDiag('native-mode', 'native drone play failed', { message: error?.message ?? String(error) })
         setIsPlaying(false)
@@ -818,8 +821,10 @@ function App() {
   function handleOctaveChange(octave) {
     setSelectedOctave(octave)
 
-    // NATIVE MODE (temp experiment): recompute native root frequency for the new register.
+    // NATIVE MODE (temp experiment): update native register + recompute root frequency.
     if (isNativeModeEnabled()) {
+      // Send register even when stopped so the next Play starts in the right register.
+      nativeModeSetRegister(octave)
       if (isPlaying) {
         nativeModeSetFrequency(selectedKey, octave, referenceA)
       }
@@ -873,6 +878,13 @@ function App() {
 
   function handleMoodChange(nextMoodId) {
     setMoodId(nextMoodId)
+
+    // NATIVE MODE (temp experiment): drive the native slow-mood layer; Tone.js untouched.
+    if (isNativeModeEnabled()) {
+      nativeModeSetMood(nextMoodId)
+      return
+    }
+
     droneEngine.setMood(nextMoodId)
   }
 

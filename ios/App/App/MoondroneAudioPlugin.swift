@@ -435,6 +435,25 @@ final class NativeDroneEngine {
     private var binPhaseL = 0.0
     private var binPhaseR = 0.0
 
+    // Register awareness (octave 2=Low, 3=Medium, 4=High, 5=VeryHigh). rootHz already
+    // encodes pitch; register additionally drives Low/Med/High/VH voicing + output trim,
+    // mirroring REGISTER_BALANCE_TRIM_DB / lowLayerScaleByRegister in soundTuning.js.
+    private var currentOctave = 3
+
+    // Strings-only detuned-ensemble state: a detuned partner phase per principle body
+    // layer (0 low-oct, 1 root, 2 fifth) plus a very slow drift LFO → a chorused string
+    // timbre with saw-ish harmonics. Idle (never summed) for every other preset.
+    private var stringsDetunePhase = [Double](repeating: 0, count: bankSize)
+    private var stringsDriftPhase = 0.0
+
+    // Mood (slow, timbral-only motion — moods.js). Never applied for Binaural. Uses two
+    // slow shelves (bloom / eclipse) + a capped upper-layer detune drift, no level cycling.
+    private var moodName = "full"
+    private var moodElapsed = 0.0
+    private var moodShelf = Biquad()   // slow "bloom" high shelf
+    private var moodNotch = Biquad()   // sweeping "eclipse" notch (Blood)
+    private var resonancePeak = Biquad()  // gentle intensity-driven resonance (>~62%)
+
     // Smoothed scalar params: target* on main, current* ramped on render thread.
     private var targetRootHz = 146.83  // D3 (matches app default key/octave region)
     private var currentRootHz = 146.83
@@ -509,6 +528,8 @@ final class NativeDroneEngine {
         lpState = 0.0; dcPrevIn = 0.0; dcPrevOut = 0.0
         noiseHp = 0.0; noiseLp = 0.0
         bassShelf.reset(); midScoop.reset(); lowMidScoop.reset(); airShelf.reset()
+        moodShelf.reset(); moodNotch.reset(); resonancePeak.reset()
+        for i in 0..<NativeDroneEngine.bankSize { stringsDetunePhase[i] = 0.0 }
 
         let twoPi = 2.0 * Double.pi
         let sr = sampleRate
@@ -559,6 +580,64 @@ final class NativeDroneEngine {
             let beatActive = self.presetName == "Binaural"
 
             let count = custom ? customN : NativeDroneEngine.bankSize
+            let isStrings = self.presetName == "Strings"
+
+            // ---- Register-derived output trim + low-pass brightness bias. ----
+            let regTrim = self.registerTrimLinear()
+            let regBright = self.currentOctave >= 4 ? 1.12 : 1.0
+
+            // ---- Mood: very slow timbral motion (moods.js). Skipped for Binaural. ----
+            // Advance the mood clock once per buffer (control rate). Motion is purely
+            // spectral (bloom shelf + eclipse notch) + a capped upper-layer detune drift —
+            // deliberately NO amplitude/tremolo cycling.
+            self.moodElapsed += Double(frameCount) / sr
+            var moodBloomDb = 0.0
+            var moodEclipseDb = 0.0
+            var moodEclipseHz = 1200.0
+            var moodBright = 1.0
+            var moodDetuneCents = 0.0
+            if !custom && !beatActive {
+                let t = self.moodElapsed
+                switch self.moodName {
+                case "new":   // near-still reference
+                    moodDetuneCents = 0.6 * sin(twoPi * t / 80.0)
+                case "full":  // slow warm bloom
+                    moodBloomDb = 3.2 * sin(twoPi * t / 184.0)
+                    moodDetuneCents = 1.4 * sin(twoPi * t / 176.0)
+                case "blue":  // spacious / cooler / wider
+                    moodBloomDb = 2.2 * sin(twoPi * t / 130.0)
+                    moodBright = 0.9
+                    moodDetuneCents = 3.0 * sin(twoPi * t / 96.0)
+                case "blood": // darker + slow sweeping eclipse shadow
+                    moodBloomDb = 2.4 * sin(twoPi * t / 60.0)
+                    let sweep = 0.5 + 0.5 * sin(twoPi * t / 48.0)
+                    moodEclipseDb = -10.5 * sweep
+                    moodEclipseHz = 700.0 + (2300.0 - 700.0) * sweep
+                    moodBright = 0.82
+                    moodDetuneCents = 4.0 * sin(twoPi * t / 54.0)
+                case "super": // brightest / most radiant
+                    moodBloomDb = 4.0 * sin(twoPi * t / 64.0)
+                    moodBright = 1.12
+                    moodDetuneCents = 2.5 * sin(twoPi * t / 70.0)
+                default:
+                    break
+                }
+            }
+            self.moodShelf.setHighShelf(1600, 0.7, moodBloomDb, sr)
+            self.moodNotch.setPeaking(moodEclipseHz, 1.2, moodEclipseDb, sr)
+            // Cap upper-layer detune (root/fifth stay fixed) and precompute the factor.
+            let moodDetuneFactor = pow(2.0, max(-6.0, min(6.0, moodDetuneCents)) / 1200.0)
+
+            // ---- Strings detuned-ensemble drift (Strings only). ----
+            self.stringsDriftPhase += twoPi * (Double(frameCount) / sr) / 30.0  // ~30 s drift
+            if self.stringsDriftPhase > twoPi { self.stringsDriftPhase -= twoPi }
+            let stringsDetuneFactor = pow(2.0, (2.6 + 1.0 * sin(self.stringsDriftPhase)) / 1200.0)
+
+            // ---- Intensity resonance (gentle Q rise above ~62%). ----
+            let resoAmt = max(0.0, (Double(self.currentIntensity) - 0.62) / 0.38)
+            let fcBase = self.pFilterBaseHz * regBright * moodBright
+            let resoFc = min(sr * 0.45, fcBase * (0.48 + 1.30 * Double(self.currentIntensity)))
+            self.resonancePeak.setPeaking(resoFc, 0.9 + resoAmt * 0.6, resoAmt * 4.0, sr)
 
             for frame in 0..<Int(frameCount) {
                 self.currentVolume += (self.targetVolume - self.currentVolume) * self.ampCoeff
@@ -582,9 +661,22 @@ final class NativeDroneEngine {
                     } else {
                         self.currentGains[i] += (targetGain - self.currentGains[i]) * self.ampCoeff
                     }
-                    self.phases[i] += twoPi * (self.currentRootHz * self.activeRatios[i]) / sr
+                    // Upper layers (octave and above) get the slow, capped mood detune drift;
+                    // root/fifth/low octave stay pitch-locked so the tuning centre never moves.
+                    let ratio = (!custom && i >= 3) ? self.activeRatios[i] * moodDetuneFactor : self.activeRatios[i]
+                    self.phases[i] += twoPi * (self.currentRootHz * ratio) / sr
                     if self.phases[i] > twoPi { self.phases[i] -= twoPi }
-                    mix += sin(self.phases[i]) * self.currentGains[i]
+
+                    var osc: Double
+                    if isStrings && i <= 2 {
+                        // Detuned saw ensemble on the principle body layers → chorused strings.
+                        self.stringsDetunePhase[i] += twoPi * (self.currentRootHz * self.activeRatios[i] * stringsDetuneFactor) / sr
+                        if self.stringsDetunePhase[i] > twoPi { self.stringsDetunePhase[i] -= twoPi }
+                        osc = 0.6 * self.sawApprox(self.phases[i]) + 0.4 * self.sawApprox(self.stringsDetunePhase[i])
+                    } else {
+                        osc = sin(self.phases[i])
+                    }
+                    mix += osc * self.currentGains[i]
                 }
 
                 // Air/wind: white noise → HP ~1.1 kHz → LP ~5 kHz → breath swell.
@@ -604,9 +696,13 @@ final class NativeDroneEngine {
                 x = self.midScoop.process(x)
                 x = self.lowMidScoop.process(x)
                 x = self.airShelf.process(x)
+                x = self.moodShelf.process(x)   // slow bloom (mood)
+                x = self.moodNotch.process(x)   // sweeping eclipse (Blood)
+                x = self.resonancePeak.process(x)  // gentle intensity resonance near cutoff
 
-                // Intensity-driven low-pass: cutoff opens with tonal amount around preset base.
-                let fc = min(sr * 0.45, self.pFilterBaseHz * (0.55 + 1.35 * Double(self.currentIntensity)))
+                // Intensity-driven low-pass (range ~0.48×–1.78× preset base, biased by register
+                // brightness + mood tone tilt). Cutoff opens with tonal amount.
+                let fc = min(sr * 0.45, fcBase * (0.48 + 1.30 * Double(self.currentIntensity)))
                 let w = twoPi * fc / sr
                 let lpAlpha = w / (1.0 + w)
                 self.lpState += lpAlpha * (x - self.lpState)
@@ -629,8 +725,8 @@ final class NativeDroneEngine {
                     right += sin(self.binPhaseR) * 0.16
                 }
 
-                // Master: makeup gain + tanh soft-clip limiter (MASTER_TUNING-style).
-                let drive = Double(self.currentVolume) * 1.68 * 1.1
+                // Master: register trim + makeup gain + tanh soft-clip limiter (MASTER_TUNING-style).
+                let drive = Double(self.currentVolume) * 1.68 * 1.1 * regTrim
                 let sl = Float(tanh(left * drive) * 0.97)
                 let sr2 = Float(tanh(right * drive) * 0.97)
                 leftPtr?[frame] = sl
@@ -671,15 +767,24 @@ final class NativeDroneEngine {
         // Cosmos high-intensity softening (COSMOS_TUNING) applied to upper + sky layers.
         let cosmosSoft = pIsCosmos ? pow(max(0.0, (tonal - 0.65) / 0.35), 1.1) : 0.0
 
+        // Register voicing: lower registers relieve low-octave/fifth/foundation pressure;
+        // High/VH ease the low octave + foundation further (intensity low-end + register).
+        let regLow = regLowLayerScale()
+        let highRegLowEase = currentOctave >= 5 ? 0.75 : (currentOctave >= 4 ? 0.85 : 1.0)
+
         for i in 0..<6 {
             var soften = i >= 2 ? (1.0 - exhaleAmount * NativeDroneEngine.breathExhaleSoftening) : 1.0
             if pIsCosmos && i >= 4 { soften *= (1.0 - 0.4 * cosmosSoft) }
-            targetGains[i] = max(0.0, pVoiceGains[i] * presence[i] * soften)
+            var g = pVoiceGains[i] * presence[i] * soften
+            if i == 0 { g *= regLow * highRegLowEase }   // −12 low octave
+            if i == 2 { g *= regLow }                    // fifth
+            targetGains[i] = max(0.0, g)
         }
 
-        // Foundation root (Shruti/Cosmos): constant low anchor eased by low-frequency settling.
+        // Foundation root (Shruti/Cosmos): constant low anchor eased by low-frequency settling
+        // and by register (less low-mid weight in Low/Medium, further eased at High/VH).
         targetGains[Layer.foundation.rawValue] = pFoundationGain > 0
-            ? max(0.0, pFoundationGain * (0.68 - lowSettling * 0.12))
+            ? max(0.0, pFoundationGain * (0.68 - lowSettling * 0.12) * regLow * highRegLowEase)
             : 0.0
 
         // Cosmos sky/celestial layers — airy high extension presence.
@@ -719,6 +824,41 @@ final class NativeDroneEngine {
     func setBreath(_ value: Float) { targetBreath = clamp01(Double(value)) }
     func setIntensity(_ value: Float) { targetIntensity = clamp01(Double(value)) }
     func setBinauralBeat(_ hz: Double) { targetBinauralBeatHz = max(0.0, min(60.0, hz)) }
+
+    /// Current musical register (2=Low … 5=VeryHigh). Benign race with the render thread;
+    /// only reads scalars derived from it, so no lock needed.
+    func setRegister(_ octave: Int) { currentOctave = max(2, min(5, octave)) }
+
+    /// Select the slow-motion Mood (moods.js ids). Ignored while the preset is Binaural.
+    func setMood(_ name: String) { moodName = name }
+
+    // Low/fifth/foundation relief in the lower registers (lowLayerScaleByRegister).
+    private func regLowLayerScale() -> Double {
+        switch currentOctave {
+        case 2: return 0.74
+        case 3: return 0.84
+        default: return 1.0
+        }
+    }
+
+    // Register output trim relative to Medium (REGISTER_BALANCE_TRIM_DB + air high-trim,
+    // gentled for native headroom). High/VH taper down; Low a touch below Medium.
+    private func registerTrimLinear() -> Double {
+        let db: Double
+        switch currentOctave {
+        case 2: db = -0.25
+        case 4: db = -2.0
+        case 5: db = -2.75
+        default: db = 0.0
+        }
+        return pow(10.0, db / 20.0)
+    }
+
+    // Soft saw-ish waveshape from a single tracked phase (cheap harmonic sum). Used only
+    // by the Strings ensemble to give the strings their reedy, harmonically rich body.
+    @inline(__always) private func sawApprox(_ p: Double) -> Double {
+        return (sin(p) + 0.5 * sin(2.0 * p) + 0.33 * sin(3.0 * p)) * 0.7
+    }
 
     /// Select a Moondrone moon preset (voice model mode).
     func setPreset(_ name: String) {
@@ -769,11 +909,15 @@ final class NativeDroneEngine {
             "isRunning": isRunning,
             "mode": useCustomPartials ? "customPartials" : "voiceModel",
             "preset": presetName,
+            "octave": currentOctave,
+            "mood": moodName,
             "rootHz": targetRootHz,
             "volume": targetVolume,
             "breath": targetBreath,
             "intensity": targetIntensity,
             "binauralBeatHz": targetBinauralBeatHz,
+            "beatActive": presetName == "Binaural",
+            "voiceCount": useCustomPartials ? customCount : NativeDroneEngine.bankSize,
         ]
     }
 }
@@ -792,7 +936,9 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setNativeDroneBreath", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setNativeDroneIntensity", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setNativeDronePreset", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "setNativeDroneBinauralBeat", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "setNativeDroneBinauralBeat", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setNativeDroneRegister", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setNativeDroneMood", returnType: CAPPluginReturnPromise)
     ]
 
     private let drone = NativeDroneEngine()
@@ -905,6 +1051,24 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         drone.setBinauralBeat(hz)
         call.resolve(["beatHz": hz])
+    }
+
+    @objc func setNativeDroneRegister(_ call: CAPPluginCall) {
+        guard let octave = call.getInt("octave") else {
+            call.reject("setNativeDroneRegister requires an integer 'octave' (2=Low … 5=VeryHigh)")
+            return
+        }
+        drone.setRegister(octave)
+        call.resolve(["octave": octave])
+    }
+
+    @objc func setNativeDroneMood(_ call: CAPPluginCall) {
+        guard let name = call.getString("name") else {
+            call.reject("setNativeDroneMood requires a string 'name' (new/full/blue/blood/super)")
+            return
+        }
+        drone.setMood(name)
+        call.resolve(["mood": name])
     }
 }
 // =============================================================================

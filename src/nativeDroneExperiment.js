@@ -80,6 +80,21 @@ export async function setNativeDroneBinauralBeat(beatHz) {
   return result
 }
 
+// Register/octave (2=Low, 3=Medium, 4=High, 5=VeryHigh). Lets the native voice model
+// mimic Low/Med/High/VH voicing + output trim like the Tone.js engine.
+export async function setNativeDroneRegister(octave) {
+  const result = await NativeDrone.setNativeDroneRegister({ octave })
+  console.log('[NativeDrone] setNativeDroneRegister ->', result)
+  return result
+}
+
+// Mood id (new/full/blue/blood/super) — slow native timbral motion. Ignored for Binaural.
+export async function setNativeDroneMood(name) {
+  const result = await NativeDrone.setNativeDroneMood({ name })
+  console.log('[NativeDrone] setNativeDroneMood ->', result)
+  return result
+}
+
 // Console API so the native engine can be driven separately from the real engine:
 //   moondroneNativeDrone.start(0.2)
 //   moondroneNativeDrone.setFrequency(146.83)   // D3
@@ -99,6 +114,8 @@ if (typeof window !== 'undefined') {
     setIntensity: setNativeDroneIntensity,
     setPreset: setNativeDronePreset,
     setBinauralBeat: setNativeDroneBinauralBeat,
+    setRegister: setNativeDroneRegister,
+    setMood: setNativeDroneMood,
     isAvailable: isNativeDroneAvailable,
     DEFAULT_PARTIALS: NATIVE_DRONE_DEFAULT_PARTIALS,
   }
