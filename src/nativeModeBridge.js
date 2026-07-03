@@ -84,39 +84,47 @@ export function keyOctaveToHz(key, octave, referenceA = 440) {
   return referenceA * 2 ** ((midi - 69) / 12)
 }
 
-// Simple moon → partial-set mapping. Intentionally rough — this proves the UI can
-// drive the native engine, not a full recreation of every Moondrone voice.
+// Moon → partial-set mapping (max 8 partials, matching the native engine). Each moon
+// gets a deliberately distinct spectrum. Still a simplification of the full Tone.js
+// voices, but voiced to feel recognizably different from each other.
 const PRESET_PARTIALS = {
-  // Mimas — near-sine purity: strong root + soft octave.
+  // Mimas — near-sine purity: dominant root with only a whisper of octave/twelfth sheen.
   Pure: [
-    { ratio: 1, gain: 0.6 },
-    { ratio: 2, gain: 0.14 },
+    { ratio: 1, gain: 0.66 },
+    { ratio: 2, gain: 0.1 },
+    { ratio: 3, gain: 0.035 },
   ],
-  // Europa — root + fifth + octave with a touch of upper.
+  // Europa — tanpura/shruti-box character: strong root drone + fifth + stacked octaves.
   Shruti: [
     { ratio: 1, gain: 0.5 },
-    { ratio: 1.5, gain: 0.28 },
-    { ratio: 2, gain: 0.18 },
-    { ratio: 3, gain: 0.06 },
-  ],
-  // Titan — fuller, more harmonics (string-like).
-  Strings: [
-    { ratio: 1, gain: 0.45 },
-    { ratio: 1.5, gain: 0.14 },
-    { ratio: 2, gain: 0.24 },
-    { ratio: 3, gain: 0.14 },
-  ],
-  // Io — airy octave + upper partials.
-  Cosmos: [
-    { ratio: 1, gain: 0.42 },
-    { ratio: 2, gain: 0.22 },
-    { ratio: 3, gain: 0.14 },
-    { ratio: 4, gain: 0.08 },
-  ],
-  // Binaural — plain root + octave (true binaural beating not modeled here).
-  Binaural: [
-    { ratio: 1, gain: 0.5 },
+    { ratio: 1.5, gain: 0.26 },
     { ratio: 2, gain: 0.2 },
+    { ratio: 3, gain: 0.1 },
+    { ratio: 4, gain: 0.05 },
+  ],
+  // Titan — rich, saw-like string body: full harmonic series 1..6 with a smooth roll-off.
+  Strings: [
+    { ratio: 1, gain: 0.44 },
+    { ratio: 2, gain: 0.26 },
+    { ratio: 3, gain: 0.17 },
+    { ratio: 4, gain: 0.11 },
+    { ratio: 5, gain: 0.07 },
+    { ratio: 6, gain: 0.045 },
+  ],
+  // Io — airy/celestial: lighter root, emphasized upper octaves + a high shimmer partial.
+  Cosmos: [
+    { ratio: 1, gain: 0.36 },
+    { ratio: 2, gain: 0.22 },
+    { ratio: 3, gain: 0.15 },
+    { ratio: 4, gain: 0.11 },
+    { ratio: 6, gain: 0.06 },
+    { ratio: 8, gain: 0.03 },
+  ],
+  // Binaural — two near-unison roots (~1% detune) create a slow beating, plus a soft octave.
+  Binaural: [
+    { ratio: 1, gain: 0.4 },
+    { ratio: 1.01, gain: 0.38 },
+    { ratio: 2, gain: 0.16 },
   ],
 }
 

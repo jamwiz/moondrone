@@ -243,13 +243,19 @@ public class MoondroneAudioPlugin: CAPPlugin, CAPBridgedPlugin {
 ///   • rootHz         — fundamental; partials track it as ratios so pitch glides smoothly
 ///   • partials       — [(ratio, gain)] set, up to `maxPartials`
 ///   • breath         — slow tremolo depth 0…1 (gentle amplitude "breathing")
-///   • intensity      — 0…1 upper-partial emphasis / brightness tilt
+///   • intensity      — 0…1 upper-partial emphasis + low-pass brightness
 ///
-/// Thread model: the render callback is the ONLY writer of the `current*` smoothed
-/// state and phases. The main thread writes `target*` scalars (word-sized, benign race)
-/// and swaps the partial arrays under `paramLock`. The render callback copies the partial
-/// set into preallocated scratch under the lock once per buffer (no per-sample locking,
-/// no heap allocation on the audio thread).
+/// Signal chain (per sample): summed partials → intensity-driven one-pole low-pass →
+/// DC-blocking high-pass → master volume → tanh soft-clip limiter.
+///
+/// Preset changes morph click-free: when a slot's ratio changes, that slot fades to
+/// silence, swaps ratio (phase reset only while inaudible), then fades back in.
+///
+/// Thread model: the render callback is the ONLY writer of the `current*`/`active*`
+/// state, phases, and filter memory. The main thread writes `target*` scalars
+/// (word-sized, benign race) and the pending partial set under `paramLock`. The render
+/// callback snapshots the partial set into preallocated scratch under the lock once per
+/// buffer (no per-sample locking, no heap allocation on the audio thread).
 final class NativeDroneEngine {
     struct Partial { var ratio: Double; var gain: Float }
 
@@ -260,18 +266,23 @@ final class NativeDroneEngine {
     private let sampleRate: Double = 44100.0
     private static let maxPartials = 8
 
-    // Partial set (guarded by paramLock — written on main, snapshotted on render thread).
+    // Pending partial set (guarded by paramLock — written on main, snapshotted on render thread).
     private let paramLock = NSLock()
-    private var ratios = [Double](repeating: 0, count: maxPartials)
-    private var targetGains = [Float](repeating: 0, count: maxPartials)
+    private var pendingRatios = [Double](repeating: 0, count: maxPartials)
+    private var requestedGains = [Float](repeating: 0, count: maxPartials)
     private var activeCount = 0
 
     // Render-thread-only state.
+    private var activeRatios = [Double](repeating: 0, count: maxPartials)
     private var currentGains = [Float](repeating: 0, count: maxPartials)
     private var phases = [Double](repeating: 0, count: maxPartials)
-    private var scratchRatios = [Double](repeating: 0, count: maxPartials)
-    private var scratchTargetGains = [Float](repeating: 0, count: maxPartials)
+    private var scratchPending = [Double](repeating: 0, count: maxPartials)
+    private var scratchRequested = [Float](repeating: 0, count: maxPartials)
     private var breathPhase = 0.0
+    // Tone-shaping filter memory (render thread only).
+    private var lpState = 0.0
+    private var dcPrevIn = 0.0
+    private var dcPrevOut = 0.0
 
     // Smoothed scalar params: target* set on main, current* ramped on render thread.
     private var targetRootHz = 110.0     // A2
@@ -312,9 +323,12 @@ final class NativeDroneEngine {
                           userInfo: [NSLocalizedDescriptionKey: "could not create AVAudioFormat"])
         }
 
-        // Start silent and ramp up so there is no onset click.
+        // Start silent and ramp up so there is no onset click. Reset filter memory.
         currentVolume = 0.0
         targetVolume = max(0.0, min(1.0, volume ?? 0.2))
+        lpState = 0.0
+        dcPrevIn = 0.0
+        dcPrevOut = 0.0
 
         let twoPi = 2.0 * Double.pi
 
@@ -326,8 +340,8 @@ final class NativeDroneEngine {
             self.paramLock.lock()
             let count = self.activeCount
             for i in 0..<count {
-                self.scratchRatios[i] = self.ratios[i]
-                self.scratchTargetGains[i] = self.targetGains[i]
+                self.scratchPending[i] = self.pendingRatios[i]
+                self.scratchRequested[i] = self.requestedGains[i]
             }
             self.paramLock.unlock()
 
@@ -350,16 +364,41 @@ final class NativeDroneEngine {
 
                 var mix = 0.0
                 for i in 0..<count {
-                    self.currentGains[i] += (self.scratchTargetGains[i] - self.currentGains[i]) * ampCoeff
-                    let inc = twoPi * (self.currentRootHz * self.scratchRatios[i]) / self.sampleRate
+                    // Click-free preset morph: if the ratio for this slot changed, fade the slot
+                    // out, then swap the ratio (and reset phase) only once it is inaudible.
+                    if self.activeRatios[i] != self.scratchPending[i] {
+                        self.currentGains[i] += (0.0 - self.currentGains[i]) * ampCoeff
+                        if self.currentGains[i] < 0.0008 {
+                            self.activeRatios[i] = self.scratchPending[i]
+                            self.phases[i] = 0.0
+                        }
+                    } else {
+                        self.currentGains[i] += (self.scratchRequested[i] - self.currentGains[i]) * ampCoeff
+                    }
+
+                    let inc = twoPi * (self.currentRootHz * self.activeRatios[i]) / self.sampleRate
                     self.phases[i] += inc
                     if self.phases[i] > twoPi { self.phases[i] -= twoPi }
                     // Intensity tilt: upper partials (ratio > 1) fade in with brightness.
-                    let tilt = self.scratchRatios[i] <= 1.0 ? 1.0 : Double(0.35 + 0.65 * self.currentIntensity)
+                    let tilt = self.activeRatios[i] <= 1.0 ? 1.0 : Double(0.35 + 0.65 * self.currentIntensity)
                     mix += sin(self.phases[i]) * Double(self.currentGains[i]) * tilt
                 }
 
-                let sample = Float(mix * ampMod) * self.currentVolume
+                let raw = mix * ampMod
+
+                // Tone shaping: one-pole low-pass whose cutoff opens with intensity (600 Hz → 5800 Hz).
+                let fc = 600.0 + Double(self.currentIntensity) * 5200.0
+                let w = twoPi * fc / self.sampleRate
+                let lpAlpha = w / (1.0 + w)
+                self.lpState += lpAlpha * (raw - self.lpState)
+
+                // DC-blocking high-pass (~3–4 Hz) removes any offset / subsonic buildup.
+                let dcOut = self.lpState - self.dcPrevIn + 0.9995 * self.dcPrevOut
+                self.dcPrevIn = self.lpState
+                self.dcPrevOut = dcOut
+
+                // Master volume + tanh soft-clip limiter (transparent at low level, tames peaks).
+                let sample = Float(tanh(dcOut * Double(self.currentVolume) * 1.1))
                 for buffer in ablPointer {
                     guard let dst = buffer.mData?.assumingMemoryBound(to: Float.self) else { continue }
                     dst[frame] = sample
@@ -409,18 +448,19 @@ final class NativeDroneEngine {
         targetIntensity = max(0.0, min(1.0, value))
     }
 
-    /// Replace the partial set. Gains ramp from their current values (click-free); extra
-    /// partials beyond `maxPartials` are ignored.
+    /// Replace the partial set. Slots whose ratio changes morph click-free (fade out →
+    /// swap ratio → fade in) on the render thread; extra partials beyond `maxPartials`
+    /// are ignored.
     func setPartials(_ partials: [Partial]) {
         let count = min(partials.count, NativeDroneEngine.maxPartials)
         paramLock.lock()
         for i in 0..<count {
-            ratios[i] = partials[i].ratio
-            targetGains[i] = max(0.0, min(1.0, partials[i].gain))
+            pendingRatios[i] = partials[i].ratio
+            requestedGains[i] = max(0.0, min(1.0, partials[i].gain))
         }
         // Fade unused slots to silence rather than dropping them abruptly.
         if count < activeCount {
-            for i in count..<activeCount { targetGains[i] = 0.0 }
+            for i in count..<activeCount { requestedGains[i] = 0.0 }
         }
         activeCount = max(count, activeCount)
         // Once faded, shrink the active range on the next set; keep summing the fading tails now.
@@ -432,7 +472,7 @@ final class NativeDroneEngine {
         let count = activeCount
         var partialInfo: [[String: Any]] = []
         for i in 0..<count {
-            partialInfo.append(["ratio": ratios[i], "gain": targetGains[i]])
+            partialInfo.append(["ratio": pendingRatios[i], "gain": requestedGains[i]])
         }
         paramLock.unlock()
         return [
