@@ -26,6 +26,7 @@ import {
   isNativeModeEnabled,
   isNativeModeSupported,
   nativeModePlay,
+  nativeModeReassert,
   nativeModeSetBinauralBeat,
   nativeModeSetBreath,
   nativeModeSetFrequency,
@@ -837,6 +838,18 @@ function App() {
   function applyTuning(nextReferenceA) {
     const clamped = Math.min(MAX_REFERENCE_A_HZ, Math.max(MIN_REFERENCE_A_HZ, nextReferenceA))
     setReferenceA(clamped)
+
+    // NATIVE MODE (temp experiment): reference A must retune the native drone too. The
+    // native engine takes an absolute rootHz, so recompute it from key/octave + new A.
+    // When stopped, just persist the state above so the next native Play uses it.
+    if (isNativeModeEnabled()) {
+      if (isPlaying) {
+        // Small tuning step → smooth audible pitch glide (not the key-change dip gesture).
+        nativeModeSetFrequency(selectedKey, selectedOctave, clamped, 'glide')
+      }
+      return
+    }
+
     droneEngine.setReferenceA(clamped)
   }
 
@@ -936,6 +949,81 @@ function App() {
     droneEngine.setVolume(toEngineVolume(nextVolume))
   }
 
+  // NATIVE MODE metronome (temp experiment): start the WebAudio metronome scheduler while the
+  // native Swift drone keeps playing. Isolation guarantees:
+  //   • never calls nativeModeStop / droneEngine.stop / setIsPlaying(false)
+  //   • never judges the native drone via droneEngine.isReady/contextState
+  //   • skips the aggressive native session reconfigure (skipNativeReconfigure)
+  //   • re-asserts the native drone afterward (recovers if the shared session was bumped)
+  //   • on failure, stops ONLY the metronome and leaves the native drone + its UI untouched
+  async function startMetronomeOverNativeDrone() {
+    const operationToken = beginMetronomeOperation('play')
+    metronomeStartPendingRef.current = true
+    setMetronomePulse({ tick: 0, downbeat: false })
+
+    // The native drone already owns a live `.playback` session and running audio graph, so this
+    // is the FAST path (mirrors the Tone "drone already running" case): skip the media-primer
+    // startup guard AND primeForPlayback entirely (droneEngine.startMetronome resumes the Tone
+    // context + primer itself, inside this tap's gesture window), skip the native session
+    // reconfigure, and start the audible scheduler immediately via fastAudibleStart — no drone
+    // settle/recovery window. No cold rebuild.
+    const contextBefore = droneEngine.getContextState?.() ?? 'unknown'
+    const startedAtMs = performance.now()
+    audioDiag('metronome', 'native-mode metronome path ENTERED (fast, over native drone)', {
+      contextBefore,
+      primerSkipped: true,
+      bpm: metronomeBpm,
+    })
+
+    try {
+      droneEngine.setMetronomeSoundMode(DEFAULT_METRONOME_SOUND_MODE)
+      droneEngine.setMetronomeMeter(DEFAULT_METRONOME_METER)
+      const startResult = await droneEngine.startMetronome(metronomeBpm, {
+        operationToken,
+        skipNativeReconfigure: true,
+        fastAudibleStart: true,
+      })
+
+      if (!isMetronomeOperationCurrent(operationToken)) {
+        audioDiag('metronome', 'stale native metronome op ignored', { phase: 'after-startMetronome' })
+        droneEngine.stopMetronome({ droneActive: true })
+        return
+      }
+
+      if (!isMetronomeEngineReady()) {
+        droneEngine.stopMetronome({ droneActive: true })
+        throw new Error('Native-mode metronome failed — scheduler/context not ready after start')
+      }
+
+      setIsMetronomePlaying(true)
+      // startMetronome skipped the native reconfigure, so the native drone should be untouched.
+      // Reassert only recovers the AVAudioEngine graph if it was somehow bumped — never toggles UI.
+      nativeModeReassert()
+      audioDiag('metronome', 'native-mode metronome START SUCCESS', {
+        startMetronomeMs: Math.round(performance.now() - startedAtMs),
+        contextBefore,
+        contextAfter: droneEngine.getContextState?.() ?? 'unknown',
+        startupRecovered: startResult?.startupRecovered === true,
+        nativeDroneReasserted: 'requested (recover-if-bumped)',
+        success: true,
+      })
+    } catch (error) {
+      // Honest failure: stop ONLY the metronome. Never stop the native drone, never set drone
+      // isPlaying false, never poison shared audio health (isPlaying stays true → guarded).
+      audioDiag('metronome', 'native-mode metronome START FAILED — native drone left untouched', {
+        message: error?.message ?? String(error),
+        startMetronomeMs: Math.round(performance.now() - startedAtMs),
+        success: false,
+      })
+      console.error('[Moondrone metronome] native-mode start failed', error)
+      droneEngine.stopMetronome({ droneActive: true })
+      setIsMetronomePlaying(false)
+      nativeModeReassert()
+    } finally {
+      metronomeStartPendingRef.current = false
+    }
+  }
+
   async function handleMetronomePlay() {
     markUserAudioAction()
     audioDiag('metronome', 'handleMetronomePlay invoked — UI BEFORE', {
@@ -954,6 +1042,14 @@ function App() {
       audioDiag('metronome', 'handleMetronomePlay EARLY RETURN — UI thinks metronome already playing', {
         engineMetronomePlaying: droneEngine.getMetronomeDiagnostics?.()?.metronomePlaying,
       })
+      return
+    }
+
+    // NATIVE MODE (temp experiment): the native drone is a separate AVAudioEngine graph, so
+    // the Tone drone diagnostics are meaningless for it. Layer the WebAudio metronome OVER the
+    // running native drone via an isolated path that never stops/judges the native drone.
+    if (isNativeModeEnabled() && isPlaying) {
+      await startMetronomeOverNativeDrone()
       return
     }
 
@@ -1127,6 +1223,16 @@ function App() {
     markUserAudioAction()
     beginMetronomeOperation('stop')
     metronomeStartPendingRef.current = false
+
+    // NATIVE MODE (temp experiment): stop ONLY the WebAudio metronome scheduler; the native
+    // drone is a separate graph, so skip the Tone-drone output verify/repair and just re-assert
+    // the native drone. droneActive:true keeps stopMetronome from pausing the primer/tearing down.
+    if (isNativeModeEnabled() && isPlaying) {
+      droneEngine.stopMetronome({ droneActive: true })
+      setIsMetronomePlaying(false)
+      nativeModeReassert()
+      return
+    }
 
     const droneActive = isPlaying || droneEngine.isPlaying === true
     droneEngine.stopMetronome({ droneActive })

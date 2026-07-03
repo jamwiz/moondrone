@@ -19,6 +19,8 @@ import { Capacitor } from '@capacitor/core'
 import { BINAURAL_MODES, DEFAULT_BINAURAL_MODE_ID } from './soundTuning'
 import { DEFAULT_MOOD_ID } from './moods'
 import {
+  configureAndStartNativeDrone,
+  reassertNativeDrone,
   setNativeDroneBinauralBeat,
   setNativeDroneBreath,
   setNativeDroneFrequency,
@@ -27,7 +29,6 @@ import {
   setNativeDronePreset,
   setNativeDroneRegister,
   setNativeDroneVolume,
-  startNativeDrone,
   stopNativeDrone,
 } from './nativeDroneExperiment'
 
@@ -177,23 +178,25 @@ function safeOctave(octave) {
   return Number.isFinite(n) ? Math.max(2, Math.min(5, Math.round(n))) : 3
 }
 
-// uiVolumePercent is 0–100; NativeDrone expects 0–1. Presets are now driven by NAME so
-// the native "Moondrone voice model" (voiceGains, breath, air, register, mood) does the
-// synthesis; register + mood are sent alongside so the moon matches the UI immediately.
+// uiVolumePercent is 0–100; NativeDrone expects 0–1. Presets are driven by NAME so the
+// native "Moondrone voice model" (voiceGains, breath, air, register, mood) does the
+// synthesis. This is now a SINGLE atomic native call: the Swift side configures the whole
+// voice state (preset/register/pitch/mood/beat/intensity/breath) and then starts, so the
+// drone begins directly in the selected state — no default-Shruti/D3 flash, no per-call lag.
 export function nativeModePlay({ key, octave, referenceA, intensity, breath, volumePercent, presetName, binauralModeId, moodId }) {
   const hz = keyOctaveToHz(key, octave, referenceA)
   const preset = nativePresetName(presetName)
   return safe(
-    (async () => {
-      await startNativeDrone(clamp01(volumePercent / 100))
-      await setNativeDronePreset(preset)
-      await setNativeDroneRegister(safeOctave(octave))
-      await setNativeDroneMood(moodId ?? DEFAULT_MOOD_ID)
-      await setNativeDroneBinauralBeat(beatHzForPreset(preset, binauralModeId))
-      await setNativeDroneFrequency(hz)
-      await setNativeDroneIntensity(clamp01(intensity / 100))
-      await setNativeDroneBreath(clamp01(breath / 100))
-    })(),
+    configureAndStartNativeDrone({
+      volume: clamp01(volumePercent / 100),
+      rootHz: hz,
+      octave: safeOctave(octave),
+      preset,
+      mood: moodId ?? DEFAULT_MOOD_ID,
+      beatHz: beatHzForPreset(preset, binauralModeId),
+      intensity: clamp01(intensity / 100),
+      breath: clamp01(breath / 100),
+    }),
   )
 }
 
@@ -201,11 +204,19 @@ export function nativeModeStop() {
   return safe(stopNativeDrone())
 }
 
-export function nativeModeSetFrequency(key, octave, referenceA) {
+// Re-assert the native drone after the shared iOS session was reconfigured (metronome
+// start). Fire-and-forget + error-safe; never toggles drone UI state.
+export function nativeModeReassert() {
+  return safe(reassertNativeDrone())
+}
+
+// transition: 'note' (default) for key/octave changes → native dip+retune gesture;
+//             'glide' for reference-A tuning steps → smooth audible pitch ramp.
+export function nativeModeSetFrequency(key, octave, referenceA, transition = 'note') {
   return safe(
     (async () => {
       await setNativeDroneRegister(safeOctave(octave))
-      await setNativeDroneFrequency(keyOctaveToHz(key, octave, referenceA))
+      await setNativeDroneFrequency(keyOctaveToHz(key, octave, referenceA), transition)
     })(),
   )
 }

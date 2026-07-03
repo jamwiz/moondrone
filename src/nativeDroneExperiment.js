@@ -32,6 +32,23 @@ export async function startNativeDrone(volume) {
   return result
 }
 
+// Atomic configure + start — one native round-trip so the drone begins directly in the
+// requested voice state (no default-Shruti/D3 flash, no per-call latency). Params:
+//   { volume, rootHz, octave, preset, mood, beatHz, intensity, breath } (all 0–1 where 0–1).
+export async function configureAndStartNativeDrone(params = {}) {
+  const result = await NativeDrone.configureAndStartNativeDrone(params)
+  console.log('[NativeDrone] configureAndStartNativeDrone ->', result)
+  return result
+}
+
+// Re-assert the native engine after the shared iOS session was reconfigured (e.g. the
+// WebAudio metronome started in Native Mode). Never changes logical running state.
+export async function reassertNativeDrone() {
+  const result = await NativeDrone.reassertNativeDrone()
+  console.log('[NativeDrone] reassertNativeDrone ->', result)
+  return result
+}
+
 export async function stopNativeDrone() {
   const result = await NativeDrone.stopNativeDrone()
   console.log('[NativeDrone] stopNativeDrone ->', result)
@@ -44,8 +61,10 @@ export async function setNativeDroneVolume(value) {
   return result
 }
 
-export async function setNativeDroneFrequency(rootHz) {
-  const result = await NativeDrone.setNativeDroneFrequency({ rootHz })
+// transition: 'note' (default) → musical dip+retune gesture (key/register changes);
+//             'glide' → smooth audible pitch ramp (small reference-A tuning steps).
+export async function setNativeDroneFrequency(rootHz, transition = 'note') {
+  const result = await NativeDrone.setNativeDroneFrequency({ rootHz, transition })
   console.log('[NativeDrone] setNativeDroneFrequency ->', result)
   return result
 }
@@ -116,6 +135,8 @@ if (typeof window !== 'undefined') {
     setBinauralBeat: setNativeDroneBinauralBeat,
     setRegister: setNativeDroneRegister,
     setMood: setNativeDroneMood,
+    configureAndStart: configureAndStartNativeDrone,
+    reassert: reassertNativeDrone,
     isAvailable: isNativeDroneAvailable,
     DEFAULT_PARTIALS: NATIVE_DRONE_DEFAULT_PARTIALS,
   }
