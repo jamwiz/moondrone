@@ -159,6 +159,14 @@ function NativeToneLabControls() {
         <ToneLabSlider label="Binaural organ" value={settings.binauralOrgan} onChange={(v) => update('binauralOrgan', v)} />
       </details>
 
+      <details className="audio-debug-details audio-debug-details-nested" open>
+        <summary className="audio-debug-details-summary">Mood / Phase</summary>
+        <ToneLabSlider label="Mood amount" value={settings.moodAmount} onChange={(v) => update('moodAmount', v)} />
+        <ToneLabSlider label="Mood resonance" value={settings.moodResonanceAmount} onChange={(v) => update('moodResonanceAmount', v)} />
+        <ToneLabSlider label="Mood transition speed" value={settings.moodTransitionSpeed} onChange={(v) => update('moodTransitionSpeed', v)} />
+        <ToneLabSlider label="Mood orbit amount" value={settings.moodOrbitAmount} onChange={(v) => update('moodOrbitAmount', v)} />
+      </details>
+
       <details className="audio-debug-details audio-debug-details-nested">
         <summary className="audio-debug-details-summary">Moon Trims (dB)</summary>
         <ToneLabSlider label="Pure trim" value={settings.pureTrimDb} onChange={(v) => update('pureTrimDb', v)} min={-6} max={6} step={0.1} isDb />

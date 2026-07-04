@@ -42,6 +42,20 @@
 //   // A tiny bit for Shruti:
 //   window.moondroneNativeToneLab.set({ shrutiOrgan: 0.12 })
 //
+//   // Softer + snappier phase/mood movement:
+//   window.moondroneNativeToneLab.set({
+//     moodAmount: 0.45,
+//     moodResonanceAmount: 0.30,
+//     moodOrbitAmount: 0.25,
+//     moodTransitionSpeed: 0.75,
+//   })
+//
+//   // A bit more mood depth but still fairly quick to settle:
+//   window.moondroneNativeToneLab.set({
+//     moodAmount: 0.70,
+//     moodTransitionSpeed: 0.45,
+//   })
+//
 //   // Back to the subtle default experiment:
 //   window.moondroneNativeToneLab.reset()
 //
@@ -82,6 +96,11 @@ export const NATIVE_TONE_LAB_DEFAULTS = Object.freeze({
   stringsTrimDb: 0,
   cosmosTrimDb: 0,
   binauralTrimDb: 0,
+  // ---- Mood / phase shaping (Native Mode only; Binaural ignores mood) ----
+  moodAmount: 0.55, // master depth for bloom/eclipse/brightness/width/detune/orbit + resonance
+  moodResonanceAmount: 0.45, // scales the resonant "note-like" part (eclipse notch + orbit cents)
+  moodTransitionSpeed: 0.65, // how fast phase changes settle (0 ≈ 1.8 s slow … 1 ≈ 0.4 s snappy)
+  moodOrbitAmount: 0.45, // scales the orbit pair level (soften Blood/Super/Blue orbits)
 })
 
 // Named starting points returned by .presets().
@@ -126,6 +145,7 @@ const UNIT_KEYS = [
   'organToneAmount', 'organToneBrightness', 'organToneBlend',
   'triangleBody', 'sawBody', 'formantBody',
   'pureOrgan', 'shrutiOrgan', 'stringsOrgan', 'cosmosOrgan', 'binauralOrgan',
+  'moodAmount', 'moodResonanceAmount', 'moodTransitionSpeed', 'moodOrbitAmount',
 ]
 const DB_KEYS = [
   'outputTrimDb', 'pureTrimDb', 'shrutiTrimDb', 'stringsTrimDb', 'cosmosTrimDb', 'binauralTrimDb',

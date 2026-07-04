@@ -636,9 +636,9 @@ final class NativeDroneEngine {
     private var gainMorphFramesRemaining = 0
     private var lastTransitionKind = "none"  // note | register | preset | glide | none (debug)
 
-    // Register-derived scalars smoothed over ~1.8 s so octave/register changes morph the output
-    // trim + filter brightness in step with the register deck crossfade (~1.80 s) — not faster.
-    private lazy var regCoeff = 1.0 - exp(-1.0 / (1.8 * sampleRate))
+    // Register-derived scalars smoothed over ~2.05 s so octave/register changes morph the output
+    // trim + filter brightness in step with the register deck crossfade (~2.05 s) — not faster.
+    private lazy var regCoeff = 1.0 - exp(-1.0 / (2.05 * sampleRate))
     private var curRegTrim = 1.0
     private var curRegBright = 1.0
 
@@ -691,8 +691,8 @@ final class NativeDroneEngine {
     // for whether the carriers sound; the voice bank + wash + width morph via their own smoothing.
     private var curBeatMix = 0.0
     private var registerChangePending = false   // set by setRegister → next changeNote uses reg timing
-    private lazy var noteXfadeFrames = Int(1.30 * sampleRate)      // key change overlap ~1.30 s
-    private lazy var registerXfadeFrames = Int(1.80 * sampleRate)  // register change overlap ~1.80 s
+    private lazy var noteXfadeFrames = Int(1.50 * sampleRate)      // key change overlap ~1.50 s
+    private lazy var registerXfadeFrames = Int(2.05 * sampleRate)  // register change overlap ~2.05 s
 
     // ---- Smoothed preset scalars (glided so a moon change never snaps pan/width/timbre) ------
     private var curWidth = 0.44                                   // smoothed mid/side width
@@ -735,6 +735,15 @@ final class NativeDroneEngine {
     private var tlPresetTrimDb: [String: Double] = ["Pure": 0.0, "Shruti": 0.0, "Strings": 0.0, "Cosmos": 0.0, "Binaural": 0.0]
     private var curPresetOrgan = 0.08     // smoothed organ amount for the current moon
     private var curPresetTrimDb = 0.0     // smoothed per-moon safety trim (dB)
+    // ---- Mood / phase shaping (Native Tone Lab, Native Mode only) ----
+    // moodAmount scales ALL mood identity (bloom / eclipse / bright tilt / width / detune / orbit).
+    // moodResonance additionally scales the resonant "note-like" parts (eclipse notch + orbit cents).
+    // moodOrbit additionally scales the orbit pair level. moodTransSpeed maps to the mood glide time
+    // (0 → ~1.8 s slow, 0.65 → ~0.9 s, 1 → ~0.4 s snappy). Defaults soften + speed up vs. the old feel.
+    private var tlMoodAmount = 0.55, curMoodAmount = 0.55
+    private var tlMoodResonance = 0.45, curMoodResonance = 0.45
+    private var tlMoodTransSpeed = 0.65, curMoodTransSpeed = 0.65
+    private var tlMoodOrbit = 0.45, curMoodOrbit = 0.45
     private var organPhase = [Double](repeating: 0, count: 6)
     private var organLp = 0.0             // soft low-pass on the organ layer (warmth)
     private var organFormant = Biquad()   // gentle vowel/organ low-mid body
@@ -779,6 +788,7 @@ final class NativeDroneEngine {
     private var dbgMoodBright = 1.0
     private var dbgMoodDetuneCents = 0.0
     private var dbgMoodOrbitActive = false
+    private var dbgTransitionHeadroomDb = 0.0
 
     init() {
         setPreset("Shruti")
@@ -885,6 +895,8 @@ final class NativeDroneEngine {
         curOutputTrimDb = tlOutputTrimDb
         curPresetOrgan = tlPresetOrgan[presetName] ?? 0.0
         curPresetTrimDb = tlPresetTrimDb[presetName] ?? 0.0
+        curMoodAmount = tlMoodAmount; curMoodResonance = tlMoodResonance
+        curMoodTransSpeed = tlMoodTransSpeed; curMoodOrbit = tlMoodOrbit
         for i in 0..<6 { organPhase[i] = 0.0 }
         organLp = 0.0; organFormant.reset()
         organRootHz = targetRootHz        // begin the organ at the requested pitch (no glide-in)
@@ -950,6 +962,11 @@ final class NativeDroneEngine {
             self.curSawBody += (self.tlSawBody - self.curSawBody) * tlCoeff
             self.curFormant += (self.tlFormant - self.curFormant) * tlCoeff
             self.curOutputTrimDb += (self.tlOutputTrimDb - self.curOutputTrimDb) * tlCoeff
+            // Mood-shaping params dezip at the same fast rate (moving sliders never clicks).
+            self.curMoodAmount += (self.tlMoodAmount - self.curMoodAmount) * tlCoeff
+            self.curMoodResonance += (self.tlMoodResonance - self.curMoodResonance) * tlCoeff
+            self.curMoodTransSpeed += (self.tlMoodTransSpeed - self.curMoodTransSpeed) * tlCoeff
+            self.curMoodOrbit += (self.tlMoodOrbit - self.curMoodOrbit) * tlCoeff
             let organTargetForPreset = self.tlPresetOrgan[self.presetName] ?? 0.0
             let trimTargetForPreset = self.tlPresetTrimDb[self.presetName] ?? 0.0
             self.curPresetOrgan += (organTargetForPreset - self.curPresetOrgan) * presetBufCoeff
@@ -1098,12 +1115,29 @@ final class NativeDroneEngine {
                 }
             }
 
-            // ---- Mood identity ramp: follow the target mood params with a ~1.2 s one-pole so a
-            // PHASE CHANGE never jumps a shelf/notch/orbit-gain (which popped). Cold start snaps
-            // (moodSnapPending) so the drone begins already in-mood. All downstream mood use reads
-            // the smoothed mCur* values. The slow per-mood sinusoids are far slower than 1.2 s, so
-            // the smoothing tracks them with negligible lag. ----
-            let moodCoeff = self.moodSnapPending ? 1.0 : (1.0 - exp(-Double(frameCount) / (1.2 * sr)))
+            // ---- Native Tone Lab mood shaping: soften + rebalance the raw mood identity BEFORE it
+            // is smoothed, so a phase change is less intense by default and each part is tunable.
+            //  • moodAmount scales the whole identity (bright TILT is scaled toward the neutral 1.0).
+            //  • moodResonance scales the resonant "note-like" parts: eclipse notch depth + orbit cents.
+            //  • moodOrbit scales the orbit pair level. Binaural already has all-zero mood (no effect). ----
+            let mA = self.curMoodAmount
+            let mR = self.curMoodResonance
+            moodBloomDb *= mA
+            moodEclipseDb *= mA * mR
+            moodBright = 1.0 + (moodBright - 1.0) * mA
+            moodDetuneCents *= mA
+            moodWidthAdd *= mA
+            orbitGain *= mA * self.curMoodOrbit
+            orbitMaxCents *= mR
+
+            // ---- Mood identity ramp: follow the target mood params with a one-pole whose time
+            // constant is set by moodTransitionSpeed (0 → ~1.8 s slow … 1 → ~0.4 s snappy) so a
+            // PHASE CHANGE settles quicker without ever jumping a shelf/notch/orbit-gain (which
+            // popped). Cold start snaps (moodSnapPending). All downstream mood use reads the smoothed
+            // mCur* values. The slow per-mood sinusoids are far slower than this, so tracking lag is
+            // negligible. ----
+            let moodTau = 1.8 - 1.4 * self.curMoodTransSpeed
+            let moodCoeff = self.moodSnapPending ? 1.0 : (1.0 - exp(-Double(frameCount) / (max(0.3, moodTau) * sr)))
             self.moodSnapPending = false
             self.mCurBloomDb += (moodBloomDb - self.mCurBloomDb) * moodCoeff
             self.mCurEclipseDb += (moodEclipseDb - self.mCurEclipseDb) * moodCoeff
@@ -1149,6 +1183,8 @@ final class NativeDroneEngine {
             self.dbgMoodBright = self.mCurBright
             self.dbgMoodDetuneCents = self.mCurDetuneCents
             self.dbgMoodOrbitActive = self.mCurOrbitGain > 0.001
+            // Peak crossfade headroom dip currently in effect (0 dB when no note/register crossfade).
+            self.dbgTransitionHeadroomDb = self.xfActive ? -2.85 : 0.0
 
             // ---- Intensity resonance (gentle Q rise above ~62%). Cutoff follows the neutral
             // intensity multiplier (0.48×–1.78× preset base), biased by smoothed register
@@ -1304,16 +1340,16 @@ final class NativeDroneEngine {
                 var mix = voiceMix * xfIn + outMix * xfOut
                 var side = voiceSide * xfIn + outSide * xfOut
 
-                // Crossfade headroom: while both decks overlap (note/register change) the summed
-                // peaks of two uncorrelated pitches can exceed either alone. Dip the dry bed by up
-                // to ~-1.6 dB at the 50 % overlap point (compensated: fully back to unity by the
-                // ends) so the limiter isn't the only thing preventing clip/pop. overlap = xfIn·xfOut
-                // peaks at 0.25 → normalise ×4 → 0..1, then a gentle -1.6 dB (×0.83) at the peak.
+                // Crossfade headroom (COMPUTED here, APPLIED downstream to the whole dry bed — decks
+                // + organ + air + orbit + binaural — right before wash + drive; see left/right below).
+                // While both decks overlap (note/register change) the summed peaks of two ~uncorrelated
+                // pitches, plus the continuous organ body, can exceed either alone. Dip the bed by up to
+                // ~-2.85 dB at the 50 % overlap point (fully back to unity at both ends) so the limiter
+                // is not the only thing preventing clip/pop. overlap = xfIn·xfOut peaks at 0.25 → ×4.
+                var xfHeadroom = 1.0
                 if self.xfActive {
                     let overlap = min(1.0, xfIn * xfOut * 4.0)
-                    let headroom = 1.0 - 0.17 * overlap
-                    mix *= headroom
-                    side *= headroom
+                    xfHeadroom = 1.0 - 0.28 * overlap   // ×0.72 ≈ -2.85 dB at peak overlap
                 }
 
                 // ---- Native Tone Lab organ layer: a soft drawbar/triangle/saw body (mono/centred
@@ -1415,10 +1451,13 @@ final class NativeDroneEngine {
                     right += sin(self.xfBinPhaseR) * 0.16 * xfOut * self.curBeatMix
                 }
 
-                // Note-change dip on the DRY bed only: the reverb tail keeps ringing across the
-                // retune (a musical bridge), while the dry voices dip to the quiet point + back.
-                left *= self.transitionGain
-                right *= self.transitionGain
+                // Apply transition gain + crossfade headroom to the WHOLE dry bed (decks + organ +
+                // air + orbit + binaural) just before the wash reads it — so the wash never gets a
+                // sudden input spike and the summed deck+organ energy stays below clip during overlap.
+                // The metronome click is added AFTER this (post-drive) and is never dipped.
+                let bedGain = self.transitionGain * xfHeadroom
+                left *= bedGain
+                right *= bedGain
 
                 // ---- Space wash: diffuse stereo reverb, wet-mixed on top of the dry bed. The
                 // dry path keeps its own DC block; the master tanh limiter downstream is the
@@ -1669,7 +1708,9 @@ final class NativeDroneEngine {
                     pureOrgan: Double?, shrutiOrgan: Double?, stringsOrgan: Double?,
                     cosmosOrgan: Double?, binauralOrgan: Double?,
                     pureTrimDb: Double?, shrutiTrimDb: Double?, stringsTrimDb: Double?,
-                    cosmosTrimDb: Double?, binauralTrimDb: Double?) {
+                    cosmosTrimDb: Double?, binauralTrimDb: Double?,
+                    moodAmount: Double?, moodResonanceAmount: Double?,
+                    moodTransitionSpeed: Double?, moodOrbitAmount: Double?) {
         if let v = organToneAmount { tlOrganAmount = clamp01(v) }
         if let v = organToneBrightness { tlOrganBright = clamp01(v) }
         if let v = organToneBlend { tlOrganBlend = clamp01(v) }
@@ -1687,6 +1728,10 @@ final class NativeDroneEngine {
         if let v = stringsTrimDb { tlPresetTrimDb["Strings"] = max(-6.0, min(6.0, v)) }
         if let v = cosmosTrimDb { tlPresetTrimDb["Cosmos"] = max(-6.0, min(6.0, v)) }
         if let v = binauralTrimDb { tlPresetTrimDb["Binaural"] = max(-6.0, min(6.0, v)) }
+        if let v = moodAmount { tlMoodAmount = clamp01(v) }
+        if let v = moodResonanceAmount { tlMoodResonance = clamp01(v) }
+        if let v = moodTransitionSpeed { tlMoodTransSpeed = clamp01(v) }
+        if let v = moodOrbitAmount { tlMoodOrbit = clamp01(v) }
     }
 
     // ---- Native metronome API (main thread) -------------------------------------------------
@@ -1863,6 +1908,9 @@ final class NativeDroneEngine {
             "crossfadeProgress": xfActive ? xfProgress : (lastTransitionKind == "note" || lastTransitionKind == "register" ? 1.0 : 0.0),
             "outgoingActive": xfActive,
             "incomingActive": xfActive,
+            "transitionHeadroomDb": dbgTransitionHeadroomDb,
+            "noteXfadeSeconds": Double(noteXfadeFrames) / sampleRate,
+            "registerXfadeSeconds": Double(registerXfadeFrames) / sampleRate,
             // preset (voice-gain) morph + mood identity ramp progress (0→1)
             "presetCrossfadeProgress": gainMorphFramesRemaining > 0
                 ? (1.0 - Double(gainMorphFramesRemaining) / Double(max(1, gainMorphTotalFrames))) : (lastTransitionKind == "preset" ? 1.0 : 0.0),
@@ -1910,6 +1958,11 @@ final class NativeDroneEngine {
             "currentPresetOrgan": curPresetOrgan,
             "currentPresetTrimDb": curPresetTrimDb,
             "outputTrimDb": curOutputTrimDb,
+            // ---- Native Tone Lab (mood / phase shaping) ----
+            "moodAmount": curMoodAmount,
+            "moodResonanceAmount": curMoodResonance,
+            "moodTransitionSpeed": curMoodTransSpeed,
+            "moodOrbitAmount": curMoodOrbit,
         ]
     }
 }
@@ -2200,7 +2253,11 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
             shrutiTrimDb: call.getDouble("shrutiTrimDb"),
             stringsTrimDb: call.getDouble("stringsTrimDb"),
             cosmosTrimDb: call.getDouble("cosmosTrimDb"),
-            binauralTrimDb: call.getDouble("binauralTrimDb")
+            binauralTrimDb: call.getDouble("binauralTrimDb"),
+            moodAmount: call.getDouble("moodAmount"),
+            moodResonanceAmount: call.getDouble("moodResonanceAmount"),
+            moodTransitionSpeed: call.getDouble("moodTransitionSpeed"),
+            moodOrbitAmount: call.getDouble("moodOrbitAmount")
         )
         call.resolve(["state": drone.snapshot()])
     }
