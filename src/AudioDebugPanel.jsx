@@ -167,6 +167,18 @@ function NativeToneLabControls() {
         <ToneLabSlider label="Mood orbit amount" value={settings.moodOrbitAmount} onChange={(v) => update('moodOrbitAmount', v)} />
       </details>
 
+      <details className="audio-debug-details audio-debug-details-nested" open>
+        <summary className="audio-debug-details-summary">Native Metronome</summary>
+        <ToneLabSlider
+          label="Metronome volume"
+          value={settings.nativeMetronomeVolume}
+          onChange={(v) => update('nativeMetronomeVolume', v)}
+          min={0}
+          max={1.5}
+          step={0.01}
+        />
+      </details>
+
       <details className="audio-debug-details audio-debug-details-nested">
         <summary className="audio-debug-details-summary">Moon Trims (dB)</summary>
         <ToneLabSlider label="Pure trim" value={settings.pureTrimDb} onChange={(v) => update('pureTrimDb', v)} min={-6} max={6} step={0.1} isDb />

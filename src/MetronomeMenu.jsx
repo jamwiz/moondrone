@@ -2,6 +2,11 @@ import { useEffect, useRef, useState } from 'react'
 import { audioDiag } from './audioDiagnostics'
 import { droneEngine } from './droneEngine'
 import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
+import {
+  getNativeToneLabSettings,
+  setNativeToneLabSettings,
+  subscribeNativeToneLab,
+} from './nativeToneLab'
 
 export function MetronomeMenu({
   bpm,
@@ -10,11 +15,22 @@ export function MetronomeMenu({
   metronomeStartPendingRef,
   onPlay,
   onStop,
+  nativeModeEnabled = false,
 }) {
   const [isOpen, setIsOpen] = useState(false)
+  const [metVolume, setMetVolume] = useState(
+    () => getNativeToneLabSettings().nativeMetronomeVolume ?? 1.0,
+  )
   const containerRef = useRef(null)
   const lastTransportActivationRef = useRef(0)
   const playIssuedViaPointerRef = useRef(false)
+
+  useEffect(() => {
+    if (!nativeModeEnabled) return undefined
+    return subscribeNativeToneLab((settings) => {
+      setMetVolume(settings.nativeMetronomeVolume)
+    })
+  }, [nativeModeEnabled])
 
   useEffect(() => {
     if (isPlaying) {
@@ -196,6 +212,28 @@ export function MetronomeMenu({
               onChange={onBpmChange}
             />
           </div>
+
+          {nativeModeEnabled ? (
+            <div className="metronome-field">
+              <div className="metronome-field-header">
+                <span>Volume</span>
+                <span className="metronome-field-value">{Math.round(metVolume * 100)}%</span>
+              </div>
+              <input
+                type="range"
+                min="0"
+                max="1.5"
+                step="0.01"
+                value={metVolume}
+                className="slider"
+                aria-label="Metronome volume"
+                onChange={(event) => {
+                  const value = Number(event.target.value)
+                  setMetVolume(setNativeToneLabSettings({ nativeMetronomeVolume: value }).nativeMetronomeVolume)
+                }}
+              />
+            </div>
+          ) : null}
 
           <button
             type="button"

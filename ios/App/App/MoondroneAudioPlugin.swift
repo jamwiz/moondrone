@@ -744,6 +744,16 @@ final class NativeDroneEngine {
     private var tlMoodResonance = 0.45, curMoodResonance = 0.45
     private var tlMoodTransSpeed = 0.65, curMoodTransSpeed = 0.65
     private var tlMoodOrbit = 0.45, curMoodOrbit = 0.45
+    // Root follower for the mood ORBIT / resonant layer. The main voice decks crossfade note/register
+    // changes, but the orbit centre reads the root directly — if it used currentRootHz (which SNAPS
+    // to the new pitch on the crossfade-arm frame) the orbit/resonant tone would jump to the new place
+    // while the bed is still mostly the old pitch. moodRootHz instead GLIDES toward targetRootHz over
+    // ~1.9 s (≈ the note/register overlap), so the orbit follows the transition smoothly (no jump, no
+    // phase reset). Reference-A glides track it too. Snapped at cold start. Glided per-buffer (~1.9 s).
+    private var moodRootHz = 146.83
+    // Native metronome click level (0…1.5; 1.0 = original level). Persisted via Native Tone Lab.
+    // Smoothed so live changes never click. Applied to the click ONLY (never the drone bed).
+    private var tlMetVolume = 1.0, curMetVolume = 1.0
     private var organPhase = [Double](repeating: 0, count: 6)
     private var organLp = 0.0             // soft low-pass on the organ layer (warmth)
     private var organFormant = Biquad()   // gentle vowel/organ low-mid body
@@ -764,6 +774,10 @@ final class NativeDroneEngine {
     private var metronomeEnabled = false
     private var metRestartPending = false
     private var metStartedEngine = false      // true if the metronome (not the drone) started the engine
+    // True while the USER has the drone playing (Play pressed, not Stopped). Distinct from isRunning,
+    // which can stay true for a metronome-only engine after the drone bed has faded out. Drives the
+    // `droneUserActive` snapshot + the teardown decision in stop()/stopMetronome().
+    private var droneUserPlaying = false
     private var metBpm = 100.0
     private var metMeter = 0                    // 0 = straight (no accent) default; 2…6 = beats/bar
     private var metSoundMode = "wood"
@@ -831,6 +845,9 @@ final class NativeDroneEngine {
         // back up from the current level rather than restarting cold.
         stopFadeActive = false
         runGeneration += 1
+        // A start() is a user drone start by default. startMetronome() calls start(volume: 0) to
+        // spin up a click-only engine and immediately clears this again (see startMetronome).
+        droneUserPlaying = true
         if isRunning {
             if let volume = volume { targetVolume = clamp01(Double(volume)) }
             startupFadeActive = true   // musical swell back up (no hard snap)
@@ -897,6 +914,8 @@ final class NativeDroneEngine {
         curPresetTrimDb = tlPresetTrimDb[presetName] ?? 0.0
         curMoodAmount = tlMoodAmount; curMoodResonance = tlMoodResonance
         curMoodTransSpeed = tlMoodTransSpeed; curMoodOrbit = tlMoodOrbit
+        curMetVolume = tlMetVolume
+        moodRootHz = targetRootHz        // orbit/resonant follower begins at the requested pitch
         for i in 0..<6 { organPhase[i] = 0.0 }
         organLp = 0.0; organFormant.reset()
         organRootHz = targetRootHz        // begin the organ at the requested pitch (no glide-in)
@@ -967,6 +986,7 @@ final class NativeDroneEngine {
             self.curMoodResonance += (self.tlMoodResonance - self.curMoodResonance) * tlCoeff
             self.curMoodTransSpeed += (self.tlMoodTransSpeed - self.curMoodTransSpeed) * tlCoeff
             self.curMoodOrbit += (self.tlMoodOrbit - self.curMoodOrbit) * tlCoeff
+            self.curMetVolume += (self.tlMetVolume - self.curMetVolume) * tlCoeff
             let organTargetForPreset = self.tlPresetOrgan[self.presetName] ?? 0.0
             let trimTargetForPreset = self.tlPresetTrimDb[self.presetName] ?? 0.0
             self.curPresetOrgan += (organTargetForPreset - self.curPresetOrgan) * presetBufCoeff
@@ -1165,7 +1185,11 @@ final class NativeDroneEngine {
             self.orbitDriftPhase += twoPi * (Double(frameCount) / sr) / self.mCurOrbitPeriod
             if self.orbitDriftPhase > twoPi { self.orbitDriftPhase -= twoPi }
             let orbitGainSm = self.mCurOrbitGain
-            let orbitCenterHz = self.currentRootHz * pow(2.0, self.mCurOrbitSemitone / 12.0)
+            // Glide the mood-root follower toward the target pitch over ~1.9 s so the orbit centre
+            // follows note/register changes smoothly instead of snapping with currentRootHz.
+            let moodRootCoeffBuf = 1.0 - exp(-Double(frameCount) / (1.9 * sr))
+            self.moodRootHz += (self.targetRootHz - self.moodRootHz) * moodRootCoeffBuf
+            let orbitCenterHz = self.moodRootHz * pow(2.0, self.mCurOrbitSemitone / 12.0)
             let orbitSweep = 0.5 + 0.5 * sin(self.orbitDriftPhase)
             let orbitCents = self.mCurOrbitMaxCents * orbitSweep
             let orbitFreqA = orbitCenterHz * pow(2.0, orbitCents / 1200.0)
@@ -1507,6 +1531,9 @@ final class NativeDroneEngine {
                     }
                 }
 
+                // Native metronome level (smoothed, 0…1.5). Applied to the click ONLY — the drone
+                // drive is separate, so the click stays audible at any drone volume (incl. 0).
+                click *= self.curMetVolume
                 // Master: smoothed register trim + makeup gain + tanh soft-clip limiter.
                 let drive = Double(self.currentVolume) * 1.68 * 1.1 * self.curRegTrim * toneLabTrimLin
                 let sl = Float(tanh(left * drive + click) * 0.97)
@@ -1628,6 +1655,9 @@ final class NativeDroneEngine {
     /// bumps runGeneration, which cancels this deferred teardown (start() swells back up).
     func stop() {
         guard isRunning else { return }
+        // The user is no longer playing the drone (even though the engine may stay alive for the
+        // metronome). Fade only the drone bed; the click level is independent of drone volume.
+        droneUserPlaying = false
         targetVolume = 0.0
         startupFadeActive = false
         stopFadeActive = true
@@ -1637,6 +1667,13 @@ final class NativeDroneEngine {
             guard let self = self else { return }
             // A new start() (or another stop) happened during the fade → do not tear down.
             guard self.runGeneration == gen, self.stopFadeActive else { return }
+            // Metronome still running → KEEP the engine + render loop alive so the click keeps
+            // sounding; only the drone bed has faded to silence. stopMetronome() tears it down later.
+            if self.metronomeEnabled {
+                self.stopFadeActive = false
+                print("⚡️ [NativeDrone] drone bed faded out; engine kept alive for metronome")
+                return
+            }
             self.stopFadeActive = false
             self.isRunning = false
             let node = self.sourceNode
@@ -1710,7 +1747,8 @@ final class NativeDroneEngine {
                     pureTrimDb: Double?, shrutiTrimDb: Double?, stringsTrimDb: Double?,
                     cosmosTrimDb: Double?, binauralTrimDb: Double?,
                     moodAmount: Double?, moodResonanceAmount: Double?,
-                    moodTransitionSpeed: Double?, moodOrbitAmount: Double?) {
+                    moodTransitionSpeed: Double?, moodOrbitAmount: Double?,
+                    nativeMetronomeVolume: Double?) {
         if let v = organToneAmount { tlOrganAmount = clamp01(v) }
         if let v = organToneBrightness { tlOrganBright = clamp01(v) }
         if let v = organToneBlend { tlOrganBlend = clamp01(v) }
@@ -1732,6 +1770,7 @@ final class NativeDroneEngine {
         if let v = moodResonanceAmount { tlMoodResonance = clamp01(v) }
         if let v = moodTransitionSpeed { tlMoodTransSpeed = clamp01(v) }
         if let v = moodOrbitAmount { tlMoodOrbit = clamp01(v) }
+        if let v = nativeMetronomeVolume { tlMetVolume = max(0.0, min(1.5, v)) }
     }
 
     // ---- Native metronome API (main thread) -------------------------------------------------
@@ -1748,17 +1787,20 @@ final class NativeDroneEngine {
         if !isRunning {
             metStartedEngine = true
             try? start(volume: 0.0)   // drone bed silent; only the click sounds
+            droneUserPlaying = false  // start() set this true; the metronome, not the user, started it
         }
     }
 
-    /// Stop the native metronome only. The in-flight click envelope decays naturally (no pop). If
-    /// the engine exists solely for the metronome, tear it down; a user-playing drone is untouched.
+    /// Stop the native metronome only. The in-flight click envelope decays naturally (no pop). The
+    /// engine is torn down only if the user is not playing the drone (metronome-only engine, or the
+    /// drone was already stopped while the metronome kept the engine alive). A user-playing drone is
+    /// left untouched.
     func stopMetronome() {
         metronomeEnabled = false
         metRestartPending = false
-        if metStartedEngine {
-            metStartedEngine = false
-            stop()
+        metStartedEngine = false
+        if !droneUserPlaying {
+            stop()   // nothing else needs the engine → musical fade + deferred teardown
         }
     }
 
@@ -1889,7 +1931,7 @@ final class NativeDroneEngine {
         return [
             "isRunning": isRunning,
             // Drone is user-playing (not just the engine kept alive silently for the metronome).
-            "droneUserActive": isRunning && !metStartedEngine,
+            "droneUserActive": droneUserPlaying,
             "mode": useCustomPartials ? "customPartials" : "voiceModel",
             "preset": presetName,
             "octave": currentOctave,
@@ -1911,6 +1953,9 @@ final class NativeDroneEngine {
             "transitionHeadroomDb": dbgTransitionHeadroomDb,
             "noteXfadeSeconds": Double(noteXfadeFrames) / sampleRate,
             "registerXfadeSeconds": Double(registerXfadeFrames) / sampleRate,
+            // Mood/orbit root follower (glides through note/register changes so it never snaps).
+            "moodFollowerHz": moodRootHz,
+            "moodTransitionActive": abs(moodRootHz - targetRootHz) > 0.5 || moodXfadeRemaining > 0,
             // preset (voice-gain) morph + mood identity ramp progress (0→1)
             "presetCrossfadeProgress": gainMorphFramesRemaining > 0
                 ? (1.0 - Double(gainMorphFramesRemaining) / Double(max(1, gainMorphTotalFrames))) : (lastTransitionKind == "preset" ? 1.0 : 0.0),
@@ -1963,6 +2008,7 @@ final class NativeDroneEngine {
             "moodResonanceAmount": curMoodResonance,
             "moodTransitionSpeed": curMoodTransSpeed,
             "moodOrbitAmount": curMoodOrbit,
+            "nativeMetronomeVolume": curMetVolume,
         ]
     }
 }
@@ -2257,7 +2303,8 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
             moodAmount: call.getDouble("moodAmount"),
             moodResonanceAmount: call.getDouble("moodResonanceAmount"),
             moodTransitionSpeed: call.getDouble("moodTransitionSpeed"),
-            moodOrbitAmount: call.getDouble("moodOrbitAmount")
+            moodOrbitAmount: call.getDouble("moodOrbitAmount"),
+            nativeMetronomeVolume: call.getDouble("nativeMetronomeVolume")
         )
         call.resolve(["state": drone.snapshot()])
     }

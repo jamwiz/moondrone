@@ -1313,6 +1313,7 @@ function App() {
               metronomeStartPendingRef={metronomeStartPendingRef}
               onPlay={handleMetronomePlay}
               onStop={handleMetronomeStop}
+              nativeModeEnabled={nativeMode}
             />
 
             <AtmosphereSelector atmosphereId={atmosphereId} onChange={setAtmosphereId} />

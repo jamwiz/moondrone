@@ -56,6 +56,9 @@
 //     moodTransitionSpeed: 0.45,
 //   })
 //
+//   // Turn the native metronome up (0–1.5; 1 = original level):
+//   window.moondroneNativeToneLab.set({ nativeMetronomeVolume: 1.2 })
+//
 //   // Back to the subtle default experiment:
 //   window.moondroneNativeToneLab.reset()
 //
@@ -101,6 +104,13 @@ export const NATIVE_TONE_LAB_DEFAULTS = Object.freeze({
   moodResonanceAmount: 0.45, // scales the resonant "note-like" part (eclipse notch + orbit cents)
   moodTransitionSpeed: 0.65, // how fast phase changes settle (0 ≈ 1.8 s slow … 1 ≈ 0.4 s snappy)
   moodOrbitAmount: 0.45, // scales the orbit pair level (soften Blood/Super/Blue orbits)
+  // ---- Native metronome (Native Mode only) ----
+  nativeMetronomeVolume: 1.0, // click level 0–1.5 (0 = silent, 1 = original, 1.5 = louder max)
+})
+
+// Params whose valid range is not the usual 0–1 (or -6..+6 dB): [min, max].
+const CUSTOM_RANGE = Object.freeze({
+  nativeMetronomeVolume: [0, 1.5],
 })
 
 // Named starting points returned by .presets().
@@ -163,6 +173,12 @@ function clampDb(value, fallback) {
   return Math.min(6, Math.max(-6, n))
 }
 
+function clampRange(value, min, max, fallback) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(max, Math.max(min, n))
+}
+
 // Merge a (possibly partial) settings object over `base`, clamping every field.
 function normalize(base, patch = {}) {
   const out = {}
@@ -171,6 +187,10 @@ function normalize(base, patch = {}) {
   }
   for (const key of DB_KEYS) {
     out[key] = clampDb(patch[key] ?? base[key], NATIVE_TONE_LAB_DEFAULTS[key])
+  }
+  for (const key of Object.keys(CUSTOM_RANGE)) {
+    const [min, max] = CUSTOM_RANGE[key]
+    out[key] = clampRange(patch[key] ?? base[key], min, max, NATIVE_TONE_LAB_DEFAULTS[key])
   }
   return out
 }
