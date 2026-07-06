@@ -1,5 +1,5 @@
 {
-  "appId": "com.moondrone.app",
+  "appId": "com.drune.app",
   "appName": "Drune",
   "webDir": "dist",
   "server": {

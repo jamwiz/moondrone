@@ -50,11 +50,11 @@ workflows:
       xcode: latest
       ios_signing:
         distribution_type: app_store
-        bundle_identifier: com.moondrone.app
+        bundle_identifier: com.drune.app
       vars:
         XCODE_PROJECT: ios/App/App.xcodeproj
         XCODE_SCHEME: App
-        BUNDLE_ID: com.moondrone.app
+        BUNDLE_ID: com.drune.app
 
     cache:
       cache_paths:
