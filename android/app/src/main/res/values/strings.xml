@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Moondrone</string>
-    <string name="title_activity_main">Moondrone</string>
+    <string name="app_name">Drune</string>
+    <string name="title_activity_main">Drune</string>
     <string name="package_name">com.moondrone.app</string>
     <string name="custom_url_scheme">com.moondrone.app</string>
 </resources>

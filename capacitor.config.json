@@ -1,6 +1,6 @@
 {
   "appId": "com.moondrone.app",
-  "appName": "Moondrone",
+  "appName": "Drune",
   "webDir": "dist",
   "server": {
     "androidScheme": "https"

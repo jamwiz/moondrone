@@ -11,7 +11,7 @@ function AboutContent() {
       <p className="info-tagline">Beautiful drones for practice and meditation.</p>
 
       <p className="info-body">
-        Moondrone is a simple drone and metronome app for musicians. Choose a key, register, and
+        Drune is a simple drone and metronome app for musicians. Choose a key, register, and
         sound, then let the drone bloom slowly into a warm, steady tone for practice, tuning, singing,
         improvisation, or meditation.
       </p>
@@ -201,7 +201,7 @@ export function InfoModal({ screen, onClose, onScreenChange }) {
           {screen === 'about' ? (
             <div id="about-panel" role="tabpanel" aria-labelledby="about-tab">
               <h2 className="info-sheet-title" id="about-sheet-title">
-                Moondrone
+                Drune
               </h2>
               <AboutContent />
             </div>

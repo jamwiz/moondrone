@@ -1,12 +1,12 @@
-# Moondrone — Capacitor Setup
+# Drune — Capacitor Setup
 
-Moondrone uses [Capacitor](https://capacitorjs.com/) to wrap the existing Vite + React + Tone.js web app as native iOS and Android apps. The wrapper preserves the single-screen UI and stable sound-engine architecture — preset routing and mix design are unchanged.
+Drune uses [Capacitor](https://capacitorjs.com/) to wrap the existing Vite + React + Tone.js web app as native iOS and Android apps. The wrapper preserves the single-screen UI and stable sound-engine architecture — preset routing and mix design are unchanged.
 
 ## Configuration
 
 | Setting | Value |
 |---------|-------|
-| App name | Moondrone |
+| App name | Drune |
 | App ID | `com.moondrone.app` |
 | Web assets (`webDir`) | `dist` |
 | Vite build output | `dist` (see `vite.config.js`) |

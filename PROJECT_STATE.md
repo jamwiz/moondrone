@@ -1,4 +1,4 @@
-# Moondrone Project State
+# Drune Project State
 
 Use this file to refresh context for another agent or chat window.
 

@@ -245,7 +245,7 @@ export function AudioDebugPanel({
   async function handleCopyLog() {
     const toneLab = getNativeToneLabSettings()
     const text = [
-      '=== Moondrone iOS audio debug ===',
+      '=== Drune iOS audio debug ===',
       `uiIsMetronomePlaying: ${uiIsMetronomePlaying}`,
       `nativeModeEnabled: ${nativeModeEnabled}`,
       `engine: ${formatJson(engineSnapshot)}`,

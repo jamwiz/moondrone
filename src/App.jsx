@@ -1294,7 +1294,7 @@ function App() {
       </div>
 
       <div className="app-stack">
-        <h1 id="app-title" className="visually-hidden">Moondrone</h1>
+        <h1 id="app-title" className="visually-hidden">Drune</h1>
 
         <header className="app-header">
           <span
