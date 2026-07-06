@@ -635,6 +635,7 @@ final class NativeDroneEngine {
     private lazy var gainMorphCoeff = 1.0 - exp(-1.0 / (0.9 * sampleRate))   // preset/register crossfade
     private var gainMorphFramesRemaining = 0
     private var lastTransitionKind = "none"  // note | register | preset | glide | none (debug)
+    private var transitionRetriggered = false // true when a note/register change arrived mid-crossfade
 
     // Register-derived scalars smoothed over ~2.05 s so octave/register changes morph the output
     // trim + filter brightness in step with the register deck crossfade (~2.05 s) — not faster.
@@ -757,6 +758,8 @@ final class NativeDroneEngine {
     // Native metronome click level (0…1.5; 1.0 = original level). Persisted via Native Tone Lab.
     // Smoothed so live changes never click. Applied to the click ONLY (never the drone bed).
     private var tlMetVolume = 1.0, curMetVolume = 1.0
+    // Native metronome click tone/pitch (0…1; 0.5 = default). Lower = darker/woodier, higher = brighter.
+    private var tlMetTone = 0.5, curMetTone = 0.5
     private var organPhase = [Double](repeating: 0, count: 6)
     private var organLp = 0.0             // soft low-pass on the organ layer (warmth)
     private var organFormant = Biquad()   // gentle vowel/organ low-mid body
@@ -789,6 +792,7 @@ final class NativeDroneEngine {
     private var metClickEnv = 0.0
     private var metClickPhase = 0.0
     private var metClickInc = 0.0
+    private var metClickBaseFreq = 0.0   // unscaled click pitch; live tone slider retargets metClickInc
     private var metClickDecay = 0.0
     private var metNoiseEnv = 0.0
     private var metNoiseDecay = 0.0
@@ -919,6 +923,7 @@ final class NativeDroneEngine {
         curMoodTransSpeed = tlMoodTransSpeed; curMoodOrbit = tlMoodOrbit
         curMoodPitchFollow = tlMoodPitchFollow
         curMetVolume = tlMetVolume
+        curMetTone = tlMetTone
         moodRootHz = targetRootHz        // orbit/resonant follower begins at the requested pitch
         for i in 0..<6 { organPhase[i] = 0.0 }
         organLp = 0.0; organFormant.reset()
@@ -992,6 +997,7 @@ final class NativeDroneEngine {
             self.curMoodOrbit += (self.tlMoodOrbit - self.curMoodOrbit) * tlCoeff
             self.curMoodPitchFollow += (self.tlMoodPitchFollow - self.curMoodPitchFollow) * tlCoeff
             self.curMetVolume += (self.tlMetVolume - self.curMetVolume) * tlCoeff
+            self.curMetTone += (self.tlMetTone - self.curMetTone) * tlCoeff
             let organTargetForPreset = self.tlPresetOrgan[self.presetName] ?? 0.0
             let trimTargetForPreset = self.tlPresetTrimDb[self.presetName] ?? 0.0
             self.curPresetOrgan += (organTargetForPreset - self.curPresetOrgan) * presetBufCoeff
@@ -1217,7 +1223,7 @@ final class NativeDroneEngine {
             self.dbgMoodDetuneCents = self.mCurDetuneCents
             self.dbgMoodOrbitActive = self.mCurOrbitGain > 0.001
             // Peak crossfade headroom dip currently in effect (0 dB when no note/register crossfade).
-            self.dbgTransitionHeadroomDb = self.xfActive ? -2.85 : 0.0
+            self.dbgTransitionHeadroomDb = self.xfActive ? (self.transitionRetriggered ? -3.6 : -2.85) : 0.0
 
             // ---- Intensity resonance (gentle Q rise above ~62%). Cutoff follows the neutral
             // intensity multiplier (0.48×–1.78× preset base), biased by smoothed register
@@ -1298,7 +1304,11 @@ final class NativeDroneEngine {
                     xfIn = sin(self.xfProgress * halfPi)
                     xfOut = cos(self.xfProgress * halfPi)
                     self.xfProgress += self.xfInc
-                    if self.xfProgress >= 1.0 { self.xfProgress = 1.0; self.xfActive = false }
+                    if self.xfProgress >= 1.0 {
+                        self.xfProgress = 1.0
+                        self.xfActive = false
+                        self.transitionRetriggered = false   // crossfade finished cleanly
+                    }
                 }
 
                 // ---- Incoming voice bank (current preset, at the NEW pitch/register) ----
@@ -1382,7 +1392,10 @@ final class NativeDroneEngine {
                 var xfHeadroom = 1.0
                 if self.xfActive {
                     let overlap = min(1.0, xfIn * xfOut * 4.0)
-                    xfHeadroom = 1.0 - 0.28 * overlap   // ×0.72 ≈ -2.85 dB at peak overlap
+                    // During a rapid retrigger the incoming bank is gliding (not snapped), so the
+                    // overlap peaks can correlate more — dip a little harder (~-3.5 dB) for safety.
+                    let dip = self.transitionRetriggered ? 0.34 : 0.28
+                    xfHeadroom = 1.0 - dip * overlap    // ×0.72 ≈ -2.85 dB / ×0.66 ≈ -3.6 dB at peak
                 }
 
                 // ---- Native Tone Lab organ layer: a soft drawbar/triangle/saw body (mono/centred
@@ -1526,6 +1539,8 @@ final class NativeDroneEngine {
                 // Render the active click envelope even after disable so a Stop mid-click decays.
                 var click = 0.0
                 if self.metClickEnv > 0.00002 {
+                    let toneMult = pow(2.0, (self.curMetTone - 0.5) * 1.4)
+                    self.metClickInc = twoPi * self.metClickBaseFreq * toneMult / sr
                     click = sin(self.metClickPhase) * self.metClickEnv
                     self.metClickPhase += self.metClickInc
                     if self.metClickPhase > twoPi { self.metClickPhase -= twoPi }
@@ -1712,9 +1727,24 @@ final class NativeDroneEngine {
     func changeNote(_ hz: Double) {
         setFrequency(hz)
         guard isRunning, !useCustomPartials else { return }   // stopped/POC: next start() snaps
+        // RAPID RE-ENTRY (Option A — robust retargeting): if a note/register crossfade is STILL
+        // running (or one is armed for the next buffer), do NOT re-arm. Re-arming would snapshot the
+        // half-blended incoming bank into the outgoing deck, discard the current mid-fade outgoing
+        // deck, and reset xfProgress to 0 — a one-sample energy step (the clip/pop when tapping fast).
+        // Instead just retarget: setFrequency above updates targetRootHz, so the incoming bank (and
+        // the mood/organ followers) GLIDE to the newest pitch while the existing crossfade keeps its
+        // schedule. Latest target wins; the outgoing deck finishes its fade continuously. No snapshot,
+        // no xfProgress reset, no phase reset → no discontinuity.
+        if xfActive || xfArmPending {
+            lastTransitionKind = registerChangePending ? "register" : "note"
+            registerChangePending = false
+            transitionRetriggered = true
+            return
+        }
         xfArmDurationFrames = registerChangePending ? registerXfadeFrames : noteXfadeFrames
         lastTransitionKind = registerChangePending ? "register" : "note"
         registerChangePending = false
+        transitionRetriggered = false
         xfArmPending = true
     }
 
@@ -1757,7 +1787,8 @@ final class NativeDroneEngine {
                     cosmosTrimDb: Double?, binauralTrimDb: Double?,
                     moodAmount: Double?, moodResonanceAmount: Double?,
                     moodTransitionSpeed: Double?, moodOrbitAmount: Double?,
-                    moodPitchFollowSpeed: Double?, nativeMetronomeVolume: Double?) {
+                    moodPitchFollowSpeed: Double?, nativeMetronomeVolume: Double?,
+                    nativeMetronomeTone: Double?) {
         if let v = organToneAmount { tlOrganAmount = clamp01(v) }
         if let v = organToneBrightness { tlOrganBright = clamp01(v) }
         if let v = organToneBlend { tlOrganBlend = clamp01(v) }
@@ -1780,7 +1811,8 @@ final class NativeDroneEngine {
         if let v = moodTransitionSpeed { tlMoodTransSpeed = clamp01(v) }
         if let v = moodOrbitAmount { tlMoodOrbit = clamp01(v) }
         if let v = moodPitchFollowSpeed { tlMoodPitchFollow = clamp01(v) }
-        if let v = nativeMetronomeVolume { tlMetVolume = max(0.0, min(1.5, v)) }
+        if let v = nativeMetronomeVolume { tlMetVolume = max(0.0, min(3.0, v)) }
+        if let v = nativeMetronomeTone { tlMetTone = clamp01(v) }
     }
 
     // ---- Native metronome API (main thread) -------------------------------------------------
@@ -1840,8 +1872,15 @@ final class NativeDroneEngine {
             noiseAmp = down ? 0.22 : 0.15
             noiseTc = 0.0018
         }
+        // Tone lab: 0.5 = current default; lower = darker/woodier, higher = brighter.
+        let woodiness = 1.0 + (0.5 - curMetTone) * 0.75
+        noiseAmp *= max(0.55, woodiness)
+        let brightness = 1.0 + (curMetTone - 0.5) * 0.36
+        amp *= brightness
+        metClickBaseFreq = freq
         metClickPhase = 0.0
-        metClickInc = twoPi * freq / sampleRate
+        let toneMult = pow(2.0, (curMetTone - 0.5) * 1.4)
+        metClickInc = twoPi * freq * toneMult / sampleRate
         metClickEnv = amp
         metClickDecay = exp(-1.0 / (tc * sampleRate))
         metNoiseEnv = noiseAmp
@@ -1961,6 +2000,8 @@ final class NativeDroneEngine {
             "outgoingActive": xfActive,
             "incomingActive": xfActive,
             "transitionHeadroomDb": dbgTransitionHeadroomDb,
+            "transitionRetriggered": transitionRetriggered,
+            "rapidTransitionActive": xfActive && transitionRetriggered,
             "noteXfadeSeconds": Double(noteXfadeFrames) / sampleRate,
             "registerXfadeSeconds": Double(registerXfadeFrames) / sampleRate,
             // Mood/orbit root follower (glides through note/register changes so it never snaps).
@@ -2021,6 +2062,7 @@ final class NativeDroneEngine {
             "moodPitchFollowSpeed": curMoodPitchFollow,
             "moodPitchFollowSeconds": max(0.18, 1.9 * pow(0.11, curMoodPitchFollow)),
             "nativeMetronomeVolume": curMetVolume,
+            "nativeMetronomeTone": curMetTone,
         ]
     }
 }
@@ -2317,7 +2359,8 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
             moodTransitionSpeed: call.getDouble("moodTransitionSpeed"),
             moodOrbitAmount: call.getDouble("moodOrbitAmount"),
             moodPitchFollowSpeed: call.getDouble("moodPitchFollowSpeed"),
-            nativeMetronomeVolume: call.getDouble("nativeMetronomeVolume")
+            nativeMetronomeVolume: call.getDouble("nativeMetronomeVolume"),
+            nativeMetronomeTone: call.getDouble("nativeMetronomeTone")
         )
         call.resolve(["state": drone.snapshot()])
     }

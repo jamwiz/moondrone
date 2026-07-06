@@ -64,8 +64,11 @@
 //     moodOrbitAmount: 0.25,
 //   })
 //
-//   // Turn the native metronome up (0–1.5; 1 = original level):
-//   window.moondroneNativeToneLab.set({ nativeMetronomeVolume: 1.2 })
+//   // Turn the native metronome up (0–3.0; 1 = original level):
+//   window.moondroneNativeToneLab.set({ nativeMetronomeVolume: 2.0 })
+//
+//   // Brighten the native metronome click (0 = dark/woody … 0.5 = default … 1 = bright):
+//   window.moondroneNativeToneLab.set({ nativeMetronomeTone: 0.7 })
 //
 //   // Back to the subtle default experiment:
 //   window.moondroneNativeToneLab.reset()
@@ -115,12 +118,13 @@ export const NATIVE_TONE_LAB_DEFAULTS = Object.freeze({
   moodPitchFollowSpeed: 0.75, // how fast the orbit/resonant tone follows note/register/root changes
   // (0 ≈ 1.9 s slow slide … 0.5 ≈ 0.63 s … 0.75 ≈ 0.36 s … 1 ≈ 0.21 s fast). SEPARATE from transitionSpeed.
   // ---- Native metronome (Native Mode only) ----
-  nativeMetronomeVolume: 1.0, // click level 0–1.5 (0 = silent, 1 = original, 1.5 = louder max)
+  nativeMetronomeVolume: 1.0, // click level 0–3.0 (0 = silent, 1 = original, 3 = much louder max)
+  nativeMetronomeTone: 0.5, // click pitch/character 0–1 (0 = dark/woody, 0.5 = default, 1 = bright)
 })
 
 // Params whose valid range is not the usual 0–1 (or -6..+6 dB): [min, max].
 const CUSTOM_RANGE = Object.freeze({
-  nativeMetronomeVolume: [0, 1.5],
+  nativeMetronomeVolume: [0, 3.0],
 })
 
 // Named starting points returned by .presets().
@@ -167,6 +171,7 @@ const UNIT_KEYS = [
   'pureOrgan', 'shrutiOrgan', 'stringsOrgan', 'cosmosOrgan', 'binauralOrgan',
   'moodAmount', 'moodResonanceAmount', 'moodTransitionSpeed', 'moodOrbitAmount',
   'moodPitchFollowSpeed',
+  'nativeMetronomeTone',
 ]
 const DB_KEYS = [
   'outputTrimDb', 'pureTrimDb', 'shrutiTrimDb', 'stringsTrimDb', 'cosmosTrimDb', 'binauralTrimDb',

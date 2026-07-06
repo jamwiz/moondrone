@@ -62,18 +62,19 @@ function getEngineSnapshot() {
   }
 }
 
-function formatSliderValue(value, isDb) {
+function formatSliderValue(value, isDb, isPercent) {
   const n = Number(value)
-  if (!Number.isFinite(n)) return isDb ? '0.0' : '0.00'
+  if (!Number.isFinite(n)) return isDb ? '0.0' : isPercent ? '0%' : '0.00'
+  if (isPercent) return `${Math.round(n * 100)}%`
   return isDb ? n.toFixed(1) : n.toFixed(2)
 }
 
-function ToneLabSlider({ label, value, onChange, min = 0, max = 1, step = 0.01, isDb = false }) {
+function ToneLabSlider({ label, value, onChange, min = 0, max = 1, step = 0.01, isDb = false, isPercent = false }) {
   return (
     <label className="audio-debug-slider-row">
       <div className="audio-debug-slider-header">
         <span className="audio-debug-slider-label">{label}</span>
-        <span className="audio-debug-slider-value">{formatSliderValue(value, isDb)}</span>
+        <span className="audio-debug-slider-value">{formatSliderValue(value, isDb, isPercent)}</span>
       </div>
       <input
         type="range"
@@ -175,7 +176,16 @@ function NativeToneLabControls() {
           value={settings.nativeMetronomeVolume}
           onChange={(v) => update('nativeMetronomeVolume', v)}
           min={0}
-          max={1.5}
+          max={3.0}
+          step={0.01}
+          isPercent
+        />
+        <ToneLabSlider
+          label="Tone"
+          value={settings.nativeMetronomeTone}
+          onChange={(v) => update('nativeMetronomeTone', v)}
+          min={0}
+          max={1}
           step={0.01}
         />
       </details>
