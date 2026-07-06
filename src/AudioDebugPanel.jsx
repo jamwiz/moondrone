@@ -165,6 +165,7 @@ function NativeToneLabControls() {
         <ToneLabSlider label="Mood resonance" value={settings.moodResonanceAmount} onChange={(v) => update('moodResonanceAmount', v)} />
         <ToneLabSlider label="Mood transition speed" value={settings.moodTransitionSpeed} onChange={(v) => update('moodTransitionSpeed', v)} />
         <ToneLabSlider label="Mood orbit amount" value={settings.moodOrbitAmount} onChange={(v) => update('moodOrbitAmount', v)} />
+        <ToneLabSlider label="Mood pitch follow" value={settings.moodPitchFollowSpeed} onChange={(v) => update('moodPitchFollowSpeed', v)} />
       </details>
 
       <details className="audio-debug-details audio-debug-details-nested" open>

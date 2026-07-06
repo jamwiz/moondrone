@@ -747,10 +747,13 @@ final class NativeDroneEngine {
     // Root follower for the mood ORBIT / resonant layer. The main voice decks crossfade note/register
     // changes, but the orbit centre reads the root directly — if it used currentRootHz (which SNAPS
     // to the new pitch on the crossfade-arm frame) the orbit/resonant tone would jump to the new place
-    // while the bed is still mostly the old pitch. moodRootHz instead GLIDES toward targetRootHz over
-    // ~1.9 s (≈ the note/register overlap), so the orbit follows the transition smoothly (no jump, no
-    // phase reset). Reference-A glides track it too. Snapped at cold start. Glided per-buffer (~1.9 s).
+    // while the bed is still mostly the old pitch. moodRootHz instead GLIDES toward targetRootHz so the
+    // orbit follows the transition smoothly (no jump, no phase reset). The follow TIME is controlled by
+    // moodPitchFollowSpeed (0 → ~1.9 s slow dramatic slide … 1 → ~0.2 s fast). This is a SEPARATE
+    // control from moodTransitionSpeed (which governs phase/mood identity changes like New→Full→Blood).
+    // Snapped at cold start; glided per-buffer. Reference-A glides track it too.
     private var moodRootHz = 146.83
+    private var tlMoodPitchFollow = 0.75, curMoodPitchFollow = 0.75
     // Native metronome click level (0…1.5; 1.0 = original level). Persisted via Native Tone Lab.
     // Smoothed so live changes never click. Applied to the click ONLY (never the drone bed).
     private var tlMetVolume = 1.0, curMetVolume = 1.0
@@ -914,6 +917,7 @@ final class NativeDroneEngine {
         curPresetTrimDb = tlPresetTrimDb[presetName] ?? 0.0
         curMoodAmount = tlMoodAmount; curMoodResonance = tlMoodResonance
         curMoodTransSpeed = tlMoodTransSpeed; curMoodOrbit = tlMoodOrbit
+        curMoodPitchFollow = tlMoodPitchFollow
         curMetVolume = tlMetVolume
         moodRootHz = targetRootHz        // orbit/resonant follower begins at the requested pitch
         for i in 0..<6 { organPhase[i] = 0.0 }
@@ -986,6 +990,7 @@ final class NativeDroneEngine {
             self.curMoodResonance += (self.tlMoodResonance - self.curMoodResonance) * tlCoeff
             self.curMoodTransSpeed += (self.tlMoodTransSpeed - self.curMoodTransSpeed) * tlCoeff
             self.curMoodOrbit += (self.tlMoodOrbit - self.curMoodOrbit) * tlCoeff
+            self.curMoodPitchFollow += (self.tlMoodPitchFollow - self.curMoodPitchFollow) * tlCoeff
             self.curMetVolume += (self.tlMetVolume - self.curMetVolume) * tlCoeff
             let organTargetForPreset = self.tlPresetOrgan[self.presetName] ?? 0.0
             let trimTargetForPreset = self.tlPresetTrimDb[self.presetName] ?? 0.0
@@ -1185,9 +1190,13 @@ final class NativeDroneEngine {
             self.orbitDriftPhase += twoPi * (Double(frameCount) / sr) / self.mCurOrbitPeriod
             if self.orbitDriftPhase > twoPi { self.orbitDriftPhase -= twoPi }
             let orbitGainSm = self.mCurOrbitGain
-            // Glide the mood-root follower toward the target pitch over ~1.9 s so the orbit centre
-            // follows note/register changes smoothly instead of snapping with currentRootHz.
-            let moodRootCoeffBuf = 1.0 - exp(-Double(frameCount) / (1.9 * sr))
+            // Glide the mood-root follower toward the target pitch so the orbit centre follows
+            // note/register changes smoothly instead of snapping with currentRootHz. The follow time
+            // is set by moodPitchFollowSpeed via a geometric map tau = 1.9·(0.11^speed):
+            // 0 ≈ 1.9 s (slow dramatic slide), 0.5 ≈ 0.63 s, 0.75 ≈ 0.36 s, 1 ≈ 0.21 s (fast but still
+            // smoothed, no pop). SEPARATE from moodTransitionSpeed (phase/mood identity changes).
+            let moodRootTau = max(0.18, 1.9 * pow(0.11, self.curMoodPitchFollow))
+            let moodRootCoeffBuf = 1.0 - exp(-Double(frameCount) / (moodRootTau * sr))
             self.moodRootHz += (self.targetRootHz - self.moodRootHz) * moodRootCoeffBuf
             let orbitCenterHz = self.moodRootHz * pow(2.0, self.mCurOrbitSemitone / 12.0)
             let orbitSweep = 0.5 + 0.5 * sin(self.orbitDriftPhase)
@@ -1748,7 +1757,7 @@ final class NativeDroneEngine {
                     cosmosTrimDb: Double?, binauralTrimDb: Double?,
                     moodAmount: Double?, moodResonanceAmount: Double?,
                     moodTransitionSpeed: Double?, moodOrbitAmount: Double?,
-                    nativeMetronomeVolume: Double?) {
+                    moodPitchFollowSpeed: Double?, nativeMetronomeVolume: Double?) {
         if let v = organToneAmount { tlOrganAmount = clamp01(v) }
         if let v = organToneBrightness { tlOrganBright = clamp01(v) }
         if let v = organToneBlend { tlOrganBlend = clamp01(v) }
@@ -1770,6 +1779,7 @@ final class NativeDroneEngine {
         if let v = moodResonanceAmount { tlMoodResonance = clamp01(v) }
         if let v = moodTransitionSpeed { tlMoodTransSpeed = clamp01(v) }
         if let v = moodOrbitAmount { tlMoodOrbit = clamp01(v) }
+        if let v = moodPitchFollowSpeed { tlMoodPitchFollow = clamp01(v) }
         if let v = nativeMetronomeVolume { tlMetVolume = max(0.0, min(1.5, v)) }
     }
 
@@ -2008,6 +2018,8 @@ final class NativeDroneEngine {
             "moodResonanceAmount": curMoodResonance,
             "moodTransitionSpeed": curMoodTransSpeed,
             "moodOrbitAmount": curMoodOrbit,
+            "moodPitchFollowSpeed": curMoodPitchFollow,
+            "moodPitchFollowSeconds": max(0.18, 1.9 * pow(0.11, curMoodPitchFollow)),
             "nativeMetronomeVolume": curMetVolume,
         ]
     }
@@ -2304,6 +2316,7 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
             moodResonanceAmount: call.getDouble("moodResonanceAmount"),
             moodTransitionSpeed: call.getDouble("moodTransitionSpeed"),
             moodOrbitAmount: call.getDouble("moodOrbitAmount"),
+            moodPitchFollowSpeed: call.getDouble("moodPitchFollowSpeed"),
             nativeMetronomeVolume: call.getDouble("nativeMetronomeVolume")
         )
         call.resolve(["state": drone.snapshot()])

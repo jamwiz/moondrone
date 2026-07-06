@@ -56,6 +56,14 @@
 //     moodTransitionSpeed: 0.45,
 //   })
 //
+//   // Make the mood/orbit/resonant tone arrive faster on note/register changes + soften mood:
+//   window.moondroneNativeToneLab.set({
+//     moodPitchFollowSpeed: 0.85,
+//     moodAmount: 0.45,
+//     moodResonanceAmount: 0.25,
+//     moodOrbitAmount: 0.25,
+//   })
+//
 //   // Turn the native metronome up (0–1.5; 1 = original level):
 //   window.moondroneNativeToneLab.set({ nativeMetronomeVolume: 1.2 })
 //
@@ -104,6 +112,8 @@ export const NATIVE_TONE_LAB_DEFAULTS = Object.freeze({
   moodResonanceAmount: 0.45, // scales the resonant "note-like" part (eclipse notch + orbit cents)
   moodTransitionSpeed: 0.65, // how fast phase changes settle (0 ≈ 1.8 s slow … 1 ≈ 0.4 s snappy)
   moodOrbitAmount: 0.45, // scales the orbit pair level (soften Blood/Super/Blue orbits)
+  moodPitchFollowSpeed: 0.75, // how fast the orbit/resonant tone follows note/register/root changes
+  // (0 ≈ 1.9 s slow slide … 0.5 ≈ 0.63 s … 0.75 ≈ 0.36 s … 1 ≈ 0.21 s fast). SEPARATE from transitionSpeed.
   // ---- Native metronome (Native Mode only) ----
   nativeMetronomeVolume: 1.0, // click level 0–1.5 (0 = silent, 1 = original, 1.5 = louder max)
 })
@@ -156,6 +166,7 @@ const UNIT_KEYS = [
   'triangleBody', 'sawBody', 'formantBody',
   'pureOrgan', 'shrutiOrgan', 'stringsOrgan', 'cosmosOrgan', 'binauralOrgan',
   'moodAmount', 'moodResonanceAmount', 'moodTransitionSpeed', 'moodOrbitAmount',
+  'moodPitchFollowSpeed',
 ]
 const DB_KEYS = [
   'outputTrimDb', 'pureTrimDb', 'shrutiTrimDb', 'stringsTrimDb', 'cosmosTrimDb', 'binauralTrimDb',
