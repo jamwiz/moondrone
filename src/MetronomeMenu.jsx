@@ -19,7 +19,7 @@ export function MetronomeMenu({
 }) {
   const [isOpen, setIsOpen] = useState(false)
   const [metVolume, setMetVolume] = useState(
-    () => getNativeToneLabSettings().nativeMetronomeVolume ?? 1.0,
+    () => getNativeToneLabSettings().nativeMetronomeVolume ?? 3,
   )
   const containerRef = useRef(null)
   const lastTransportActivationRef = useRef(0)

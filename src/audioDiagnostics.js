@@ -1,5 +1,6 @@
 // Targeted iOS audio diagnostics with an in-app ring buffer + UI subscription.
-export const AUDIO_DIAG = true
+// In-app debug panel (DBG chip) — dev builds only; hidden in production.
+export const AUDIO_DIAG = import.meta.env.DEV
 
 const MAX_ENTRIES = 200
 const buffer = []

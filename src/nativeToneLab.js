@@ -70,8 +70,11 @@
 //   // Brighten the native metronome click (0 = dark/woody … 0.5 = default … 1 = bright):
 //   window.moondroneNativeToneLab.set({ nativeMetronomeTone: 0.7 })
 //
-//   // Back to the subtle default experiment:
+//   // Back to production defaults:
 //   window.moondroneNativeToneLab.reset()
+//
+//   // Apply the baked production preset by name:
+//   window.moondroneNativeToneLab.applyPreset('productionFinal')
 //
 // Revert entirely: delete this file + its import in App.jsx, remove
 // nativeModeSetToneLab in nativeModeBridge.js and setNativeToneLab in
@@ -80,46 +83,43 @@
 import { isNativeModeSupported, nativeModeSetToneLab } from './nativeModeBridge'
 
 const STORAGE_KEY = 'moondrone.nativeToneLab'
+const STORAGE_VERSION_KEY = 'moondrone.nativeToneLab.version'
+// Bump when production defaults change so stale debug experiments are not preserved.
+const STORAGE_VERSION = 2
 
 // ---- DEFAULTS / PRESETS / PERSISTENCE ---------------------------------------
-// Edit THIS file to change default values and named presets.
-// Saved localStorage values (key: moondrone.nativeToneLab) override these defaults on load.
-// After changing defaults here, run window.moondroneNativeToneLab.reset() on a device that
-// already has old saved settings — otherwise the phone keeps the previous experiment.
+// Production defaults (Jul 2026 ship). reset() and fresh installs use these values.
 // The actual organ DSP lives in ios/App/App/MoondroneAudioPlugin.swift (setToneLab + render loop).
-//
-// Subtle experiment defaults: reproduces the current native sound + a gentle Titan organ.
 export const NATIVE_TONE_LAB_DEFAULTS = Object.freeze({
   // ---- Global organ/body character ----
-  organToneAmount: 0.25, // overall amount of drawbar-like harmonic body
-  organToneBrightness: 0.3, // organ layer brightness (kept soft)
-  organToneBlend: 0.25, // wet/dry blend of the organ-like layer
-  triangleBody: 0.45, // hollow triangle body
-  sawBody: 0.18, // subtle filtered saw density
-  formantBody: 0.18, // gentle vowel/organ low-mid body
-  outputTrimDb: 0, // safety only (-6..+6), NOT the main tone control
+  organToneAmount: 0.78,
+  organToneBrightness: 1,
+  organToneBlend: 0,
+  triangleBody: 0.91,
+  sawBody: 0.8,
+  formantBody: 0.09,
+  outputTrimDb: 0,
   // ---- Per-moon organ amount ----
-  pureOrgan: 0.02, // Mimas — almost none, stay clean
-  shrutiOrgan: 0.08, // Europa — tiny, stay shruti-like
-  stringsOrgan: 0.45, // Titan — main target, soft organ glow
-  cosmosOrgan: 0.18, // Io — a little body, stay cosmic
-  binauralOrgan: 0.0, // Binaural — none by default, stay clear
+  pureOrgan: 0.7,
+  shrutiOrgan: 0.7,
+  stringsOrgan: 1,
+  cosmosOrgan: 0.72,
+  binauralOrgan: 0.22,
   // ---- Per-moon safety trims (secondary; keep near 0) ----
   pureTrimDb: 0,
   shrutiTrimDb: 0,
   stringsTrimDb: 0,
-  cosmosTrimDb: 0,
-  binauralTrimDb: 0,
+  cosmosTrimDb: -2.9,
+  binauralTrimDb: -0.1,
   // ---- Mood / phase shaping (Native Mode only; Binaural ignores mood) ----
-  moodAmount: 0.55, // master depth for bloom/eclipse/brightness/width/detune/orbit + resonance
-  moodResonanceAmount: 0.45, // scales the resonant "note-like" part (eclipse notch + orbit cents)
-  moodTransitionSpeed: 0.65, // how fast phase changes settle (0 ≈ 1.8 s slow … 1 ≈ 0.4 s snappy)
-  moodOrbitAmount: 0.45, // scales the orbit pair level (soften Blood/Super/Blue orbits)
-  moodPitchFollowSpeed: 0.75, // how fast the orbit/resonant tone follows note/register/root changes
-  // (0 ≈ 1.9 s slow slide … 0.5 ≈ 0.63 s … 0.75 ≈ 0.36 s … 1 ≈ 0.21 s fast). SEPARATE from transitionSpeed.
+  moodAmount: 0.65,
+  moodResonanceAmount: 0.94,
+  moodTransitionSpeed: 0.84,
+  moodOrbitAmount: 0.66,
+  moodPitchFollowSpeed: 0.75,
   // ---- Native metronome (Native Mode only) ----
-  nativeMetronomeVolume: 1.0, // click level 0–3.0 (0 = silent, 1 = original, 3 = much louder max)
-  nativeMetronomeTone: 0.5, // click pitch/character 0–1 (0 = dark/woody, 0.5 = default, 1 = bright)
+  nativeMetronomeVolume: 3,
+  nativeMetronomeTone: 0.5,
 })
 
 // Params whose valid range is not the usual 0–1 (or -6..+6 dB): [min, max].
@@ -129,8 +129,8 @@ const CUSTOM_RANGE = Object.freeze({
 
 // Named starting points returned by .presets().
 export const NATIVE_TONE_LAB_PRESETS = Object.freeze({
-  // Current subtle experiment.
   default: { ...NATIVE_TONE_LAB_DEFAULTS },
+  productionFinal: { ...NATIVE_TONE_LAB_DEFAULTS },
   // No organ at all — the pre-experiment native sound.
   off: {
     ...NATIVE_TONE_LAB_DEFAULTS,
@@ -213,6 +213,13 @@ function normalize(base, patch = {}) {
 
 function readStored() {
   try {
+    const storedVersion = window?.localStorage?.getItem(STORAGE_VERSION_KEY)
+    if (storedVersion !== String(STORAGE_VERSION)) {
+      const fresh = { ...NATIVE_TONE_LAB_DEFAULTS }
+      window?.localStorage?.setItem(STORAGE_KEY, JSON.stringify(fresh))
+      window?.localStorage?.setItem(STORAGE_VERSION_KEY, String(STORAGE_VERSION))
+      return fresh
+    }
     const raw = window?.localStorage?.getItem(STORAGE_KEY)
     if (!raw) return { ...NATIVE_TONE_LAB_DEFAULTS }
     return normalize(NATIVE_TONE_LAB_DEFAULTS, JSON.parse(raw))
@@ -238,6 +245,7 @@ function notifyListeners() {
 function persist() {
   try {
     window?.localStorage?.setItem(STORAGE_KEY, JSON.stringify(settings))
+    window?.localStorage?.setItem(STORAGE_VERSION_KEY, String(STORAGE_VERSION))
   } catch {
     // ignore storage failures (private mode, etc.)
   }

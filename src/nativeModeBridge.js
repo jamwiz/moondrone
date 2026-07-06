@@ -5,7 +5,8 @@
 // engine instead of the Tone.js engine, WITHOUT deleting or replacing Tone.js.
 //
 // Isolation rules:
-//   • Native Mode is OFF by default. When off, App.jsx behaves 100% as before.
+//   • Native Mode defaults ON on iOS/Android (Capacitor native). Web/dev defaults OFF until toggled
+//     in the dev debug panel. When off, App.jsx behaves 100% as before.
 //   • The enabled flag is read live via isNativeModeEnabled() inside the App
 //     handlers, so no Tone.js code path changes when off.
 //   • All native calls here swallow errors (log only) so a native failure can
@@ -47,9 +48,13 @@ let nativeModeEnabled = readInitialFlag()
 
 function readInitialFlag() {
   try {
-    return window?.localStorage?.getItem(STORAGE_KEY) === 'true'
+    const stored = window?.localStorage?.getItem(STORAGE_KEY)
+    if (stored === 'true') return true
+    if (stored === 'false') return false
+    // Production default on device: Native Mode (Swift engine). Web/dev stays Tone.js until toggled.
+    return Capacitor.isNativePlatform()
   } catch {
-    return false
+    return Capacitor.isNativePlatform()
   }
 }
 
