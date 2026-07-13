@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { audioDiag } from './audioDiagnostics'
 import { droneEngine } from './droneEngine'
 import { isMediaPrimerStartupActive } from './mediaPrimerStartupGuard'
@@ -22,7 +22,6 @@ export function MetronomeMenu({
     () => getNativeToneLabSettings().nativeMetronomeVolume ?? 3,
   )
   const containerRef = useRef(null)
-  const menuRef = useRef(null)
   const lastTransportActivationRef = useRef(0)
   const playIssuedViaPointerRef = useRef(false)
 
@@ -160,30 +159,6 @@ export function MetronomeMenu({
     }
   }, [isOpen])
 
-  // Keep the popover inside the viewport on narrow phones. The menu is right-aligned to
-  // the trigger; as the leftmost header action it can extend past the left edge without a shift.
-  useLayoutEffect(() => {
-    const menu = menuRef.current
-    if (!isOpen || !menu) {
-      return
-    }
-
-    menu.style.transform = ''
-    const margin = 12
-    const rect = menu.getBoundingClientRect()
-    let shiftX = 0
-
-    if (rect.left < margin) {
-      shiftX = margin - rect.left
-    } else if (rect.right > window.innerWidth - margin) {
-      shiftX = window.innerWidth - margin - rect.right
-    }
-
-    if (shiftX !== 0) {
-      menu.style.transform = `translateX(${shiftX}px)`
-    }
-  }, [isOpen, nativeModeEnabled, bpm])
-
   return (
     <div className="popover metronome-menu" ref={containerRef}>
       <button
@@ -220,12 +195,7 @@ export function MetronomeMenu({
       </button>
 
       {isOpen ? (
-        <div
-          ref={menuRef}
-          className="popover-menu metronome-popover"
-          role="menu"
-          aria-label="Metronome"
-        >
+        <div className="popover-menu metronome-popover" role="menu" aria-label="Metronome">
           <div className="metronome-field">
             <div className="metronome-field-header">
               <span>Tempo</span>

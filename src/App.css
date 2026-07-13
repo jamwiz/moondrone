@@ -89,6 +89,7 @@
 }
 
 .header-actions {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -1175,7 +1176,7 @@
 /* ---------- Header metronome popover ---------- */
 
 .metronome-menu {
-  position: relative;
+  position: static;
 }
 
 .header-icon-button {
@@ -1256,15 +1257,18 @@
 }
 
 .metronome-popover {
+  position: absolute;
+  top: calc(100% + 10px);
   right: 0;
   left: auto;
   gap: 12px;
   box-sizing: border-box;
   min-width: 0;
-  width: min(264px, calc(100vw - 24px));
-  max-width: calc(100vw - 24px);
+  width: min(264px, calc(100vw - 40px));
+  max-width: calc(100vw - 40px);
   padding: 14px;
   border-radius: 20px;
+  transform: none;
 }
 
 .metronome-field {
