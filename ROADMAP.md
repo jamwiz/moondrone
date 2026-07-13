@@ -1,6 +1,6 @@
-# Moondrone Roadmap
+# Droon Roadmap
 
-This roadmap tracks the main phases for Moondrone.
+This roadmap tracks the main phases for Droon.
 
 ## Completed: Mobile-First Practice Instrument (Web)
 
@@ -46,7 +46,7 @@ The core web app is built and the sound engine is complete.
 
 ## Completed: Capacitor Setup
 
-**Capacitor is configured** — see `CAPACITOR.md`. App ID `com.moondrone.app`, `webDir` `dist`, `android/` and `ios/` projects added.
+**Capacitor is configured** — see `CAPACITOR.md`. App ID `com.droon.app`, `webDir` `dist`, `android/` and `ios/` projects added.
 
 ## Completed: Premium UI Refactor
 
@@ -93,7 +93,7 @@ Focused pass — no routing, limiter, or mix-architecture changes:
 - About and Help modal with tabbed content (`src/InfoModal.jsx`)
 - Branding sources in `assets/branding/` (`moondrone-icon.png`, `moondrone-splash-master.png`)
 - `@capacitor/assets` installed; `npm run cap:assets` generates iOS/Android icon and splash
-- Native projects updated with Moondrone icon and splash assets
+- Native projects updated with app icon and splash assets
 
 ## Completed: App Lifecycle Safety
 

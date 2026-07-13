@@ -1,4 +1,4 @@
-Moondrone
+Droon
 
 Beautiful drones for practice and meditation.
 

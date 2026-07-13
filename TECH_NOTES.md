@@ -1,4 +1,4 @@
-# Moondrone Tech Notes
+# Droon Tech Notes
 
 This file explains the project setup, architecture, and implementation details.
 
@@ -8,7 +8,7 @@ The sound engine is **stable** — no further sound-engine changes unless explic
 
 ## Project Setup
 
-Moondrone is built with Vite and React.
+Droon is built with Vite and React.
 
 - Vite runs the local dev server and builds the app.
 - React renders the app interface.
@@ -23,7 +23,7 @@ Local **git** repository (initialized 2026). Baseline commit and tag:
 |------|--------|
 | Tag | `stable-post-phone-revert` |
 | Commit | `e4e01cb` |
-| Message | Stable Moondrone baseline after phone resonance revert |
+| Message | Stable Droon baseline after phone resonance revert |
 
 Restore that snapshot:
 
@@ -827,8 +827,8 @@ Confirm on real hardware:
 | Setting | Value |
 |---------|-------|
 | Config | `capacitor.config.json` |
-| App name | Moondrone |
-| App ID | `com.moondrone.app` |
+| App name | Droon |
+| App ID | `com.droon.app` |
 | `webDir` | `dist` (matches `vite.config.js` `build.outDir`) |
 | Android project | `android/` |
 | iOS project | `ios/` |

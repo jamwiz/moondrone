@@ -1,6 +1,6 @@
-# Moondrone Sound Notes
+# Droon Sound Notes
 
-This file tracks sound design goals and the current sound-engine status for Moondrone.
+This file tracks sound design goals and the current sound-engine status for Droon.
 
 ## Project Phase
 
@@ -144,16 +144,16 @@ Implementation: `getFoundationRootOctave()` in `src/droneEngine.js` returns `LOW
 
 ## Phone Speaker Efficiency (Projection Pass)
 
-**Symptom:** Moondrone feels very loud but less projecting than ambient/ASMR reference drones; phone speakers sometimes show harmonic buzz/strain without obvious digital clipping.
+**Symptom:** Droon feels very loud but less projecting than ambient/ASMR reference drones; phone speakers sometimes show harmonic buzz/strain without obvious digital clipping.
 
 **Why ambient/ASMR often sounds louder with less strain:**
 
 - Phone speakers are tiny and efficient in roughly **800 Hz–3 kHz**; they struggle below **200–300 Hz** and distort when driven hard with stacked low-mid energy.
 - ASMR/ambient pads are usually **spectrally lean below the speaker’s useful range** — energy is placed where the driver converts watts to perceived loudness.
 - They use **fewer simultaneous body layers** (often one pad), lower crest factor, and mastering that targets midrange projection — not multi-oscillator stacks.
-- Moondrone pushes **multiple fundamentals and triangle fifth harmonics** into 130–500 Hz simultaneously; the speaker wastes excursion on inaudible/distorted bass while the midrange lacks clean headroom.
+- Droon pushes **multiple fundamentals and triangle fifth harmonics** into 130–500 Hz simultaneously; the speaker wastes excursion on inaudible/distorted bass while the midrange lacks clean headroom.
 
-**Root cause in Moondrone — speaker-efficiency mismatch, not insufficient output gain:**
+**Root cause in Droon — speaker-efficiency mismatch, not insufficient output gain:**
 
 | Factor | Effect on phone speakers |
 |--------|--------------------------|
@@ -217,7 +217,7 @@ Implementation: `getFoundationRootOctave()` in `src/droneEngine.js` returns `LOW
 
 ## Ambient Master Voicing Pass (Midrange Congestion)
 
-**Framing:** Investigated Moondrone against professionally mastered ambient / ASMR / dungeon synth — recordings that project well on phones despite sounding lighter.
+**Framing:** Investigated Droon against professionally mastered ambient / ASMR / dungeon synth — recordings that project well on phones despite sounding lighter.
 
 **Symptom:** Drone feels **dense in the middle of the spectrum** — heavy without brightness, High/Very High feel loud, harmonic buzz on speakers.
 
@@ -236,7 +236,7 @@ Implementation: `getFoundationRootOctave()` in `src/droneEngine.js` returns `LOW
 - **Less simultaneous energy in 250–600 Hz** — often one primary tone, not root + fifth + low octave + harmonics
 - **Higher spectral efficiency** — watts go to the phone’s sensitive band (~800 Hz–2 kHz), not into muddy low-mid stacking
 - **Lower crest factor / fewer beating partials** — less intermodulation buzz
-- **Perceived loudness ≠ total energy** — ambient mixes trade midrange density for clarity; Moondrone was optimized as a harmonic instrument, not a mastered pad
+- **Perceived loudness ≠ total energy** — ambient mixes trade midrange density for clarity; Droon was optimized as a harmonic instrument, not a mastered pad
 
 **Prior passes** addressed bass waste, foundation spacing, and High/Very High upper stack. **Remaining issue:** the **200–800 Hz body stack** (indices 0–3) on Pure, Strings, and Choir still has **no bus voicing** (preset peaking cuts only on Shruti/Cosmos/Binaural).
 

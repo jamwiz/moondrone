@@ -1,4 +1,4 @@
-package com.moondrone.app;
+package com.droon.app;
 
 import com.getcapacitor.BridgeActivity;
 

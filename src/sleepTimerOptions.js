@@ -1,10 +1,8 @@
 export const SLEEP_TIMER_OPTIONS = [
   { label: 'Off', value: 0 },
-  { label: '15 min', value: 15 * 60 },
-  { label: '30 min', value: 30 * 60 },
-  { label: '45 min', value: 45 * 60 },
-  { label: '60 min', value: 60 * 60 },
-  { label: '90 min', value: 90 * 60 },
+  { label: '30 min', value: 1800 },
+  { label: '60 min', value: 3600 },
+  { label: '120 min', value: 7200 },
 ]
 
 export function formatSleepTimerMinutes(durationSeconds) {

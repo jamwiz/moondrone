@@ -1,4 +1,4 @@
-# Transfer Moondrone to Mac (iOS Testing)
+# Transfer Droon to Mac (iOS Testing)
 
 Use this guide when copying the project from Windows to a Mac for Xcode builds and iPhone testing.
 
@@ -63,7 +63,7 @@ The Capacitor app target is **App** inside the **App** project.
 3. Open **Signing & Capabilities**.
 4. Check **Automatically manage signing**.
 5. Choose your **Team** from the dropdown (your Apple ID / developer team).
-6. Confirm **Bundle Identifier** is `com.moondrone.app`.
+6. Confirm **Bundle Identifier** is `com.droon.app`.
 
 If Xcode reports a provisioning error, sign in under **Xcode → Settings → Accounts** and add your Apple ID, then retry.
 
@@ -75,7 +75,7 @@ If Xcode reports a provisioning error, sign in under **Xcode → Settings → Ac
 4. Press **Run** (▶) or `Cmd+R`.
 5. On first install, open **Settings → General → VPN & Device Management** on the iPhone and trust your developer certificate if iOS asks.
 
-**Web Audio note:** Moondrone uses Tone.js. Tap **Play** in the app to start audio. If there is no sound, check the device volume and the iPhone silent switch.
+**Web Audio note:** Droon uses Tone.js. Tap **Play** in the app to start audio. If there is no sound, check the device volume and the iPhone silent switch.
 
 ## 6. Known project status
 
@@ -114,8 +114,8 @@ See `TODO.md` for the full checklist.
 
 | Setting | Value |
 |---------|-------|
-| Display name | Moondrone |
-| Bundle ID | `com.moondrone.app` |
+| Display name | Droon |
+| Bundle ID | `com.droon.app` |
 | npm package name | `moondrone` |
 
 ## 8. Troubleshooting notes
@@ -145,7 +145,7 @@ See `TODO.md` for the full checklist.
 
 ### Signing / provisioning errors
 
-- Bundle ID must stay `com.moondrone.app` unless you intentionally create a new App ID in the Apple Developer portal.
+- Bundle ID must stay `com.droon.app` unless you intentionally create a new App ID in the Apple Developer portal.
 - Enable **Automatically manage signing** and select a valid Team.
 - For a new machine, you may need to register the device in your developer account (Xcode usually does this automatically).
 

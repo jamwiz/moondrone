@@ -1,4 +1,4 @@
-# Moondrone Project State
+# Droon Project State
 
 Use this file to refresh context for another agent or chat window.
 
@@ -134,7 +134,7 @@ Re-check these only during wrapper testing or if audio code changes:
 ## Architecture
 
 - React + Vite + Tone.js
-- npm package name: `moondrone`
+- npm package name: `droon`
 - Mobile-first single-screen web UI with a moon-centered instrument
 - **Git** — local repository at project root; baseline tag **`stable-post-phone-revert`** (`e4e01cb`) captures post–phone-resonance-revert state plus startup-note and full-chain Io settle fixes. Restore with `git checkout stable-post-phone-revert` or `git reset --hard stable-post-phone-revert`
 
