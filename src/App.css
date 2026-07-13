@@ -249,6 +249,75 @@
   text-align: center;
 }
 
+/* ---------- Sleep timer selector ---------- */
+
+.sleep-timer-selector {
+  position: relative;
+}
+
+.sleep-timer-trigger:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
+}
+
+.sleep-timer-icon {
+  width: 17px;
+  height: 17px;
+}
+
+.sleep-timer-menu {
+  min-width: 188px;
+  z-index: 13;
+}
+
+.sleep-timer-menu-title {
+  margin: 0 4px 2px;
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.sleep-timer-menu-hint {
+  margin: 0 4px 6px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
+.sleep-timer-option {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 12px;
+  color: var(--text);
+  background: transparent;
+  font-size: 0.86rem;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.sleep-timer-option:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.sleep-timer-option.selected {
+  color: var(--gold);
+  background: rgba(244, 191, 127, 0.12);
+}
+
+.status-indicator .status-timer-suffix {
+  color: inherit;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
 /* ---------- Instrument ---------- */
 
 .instrument {

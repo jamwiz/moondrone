@@ -15,8 +15,10 @@ import { AtmosphereSelector } from './AtmosphereSelector'
 import { PresetSelector } from './PresetSelector'
 import { MoodSelector } from './MoodSelector'
 import { MetronomeMenu } from './MetronomeMenu'
+import { SleepTimerMenu } from './SleepTimerMenu'
 import { InfoModal } from './InfoModal'
 import { useAppLifecycle } from './useAppLifecycle'
+import { useSleepTimer } from './useSleepTimer'
 import { getMoonStageVisualStyle } from './moonVisuals'
 import { getMoonArtworkSrc } from './moonArtwork'
 import { audioDiag, AUDIO_DIAG } from './audioDiagnostics'
@@ -32,8 +34,6 @@ import {
   nativeModeSetIntensity,
   nativeModeSetMood,
   nativeModeSetMetronomeBpm,
-  nativeModeSetMetronomeMeter,
-  nativeModeSetMetronomeSoundMode,
   nativeModeSetPreset,
   nativeModeSetRegister,
   nativeModeSetVolume,
@@ -190,6 +190,17 @@ function App() {
 
   useAppLifecycle(setIsPlaying, setIsMetronomePlaying, isPlaying, isMetronomePlaying)
 
+  const sleepTimer = useSleepTimer({
+    isPlaying,
+    isMetronomePlaying,
+    nativeModeEnabled: nativeMode,
+    onNativeSleepExpired: () => {
+      setIsPlaying(false)
+      setIsMetronomePlaying(false)
+      setIsDroneStarting(false)
+    },
+  })
+
   // iOS audio interruptions (phone call, another app taking audio focus, Siri) leave the
   // Web Audio context "interrupted". The engine detects that and cleanly resets itself; here
   // we sync the UI so it never shows Drone Active / metronome running while actually silent.
@@ -268,11 +279,16 @@ function App() {
       // Native Mode metronome is straight / no accent (meter 0), so every visual pulse is a
       // regular (non-downbeat) tick — matching the audio (no accented downbeat).
       const intervalMs = Math.max(150, Math.round(60000 / Math.max(30, metronomeBpm)))
-      setMetronomePulse((prev) => ({ tick: prev.tick + 1, downbeat: false }))
+      const initialPulseId = window.setTimeout(() => {
+        setMetronomePulse((prev) => ({ tick: prev.tick + 1, downbeat: false }))
+      }, 0)
       const id = setInterval(() => {
         setMetronomePulse((prev) => ({ tick: prev.tick + 1, downbeat: false }))
       }, intervalMs)
-      return () => clearInterval(id)
+      return () => {
+        window.clearTimeout(initialPulseId)
+        clearInterval(id)
+      }
     }
 
     droneEngine.onMetronomeBeat = (downbeat) => {
@@ -651,6 +667,9 @@ function App() {
   // currently playing so we never leave both engines running, then flips the routing flag.
   function handleToggleNativeMode() {
     const next = !nativeMode
+    if (nativeMode) {
+      void sleepTimer.cancelTimer()
+    }
     if (isPlaying) {
       if (nativeMode) {
         nativeModeStop()
@@ -676,6 +695,7 @@ function App() {
 
     // NATIVE MODE (temp experiment): route Stop to the native Swift engine.
     if (isNativeModeEnabled()) {
+      void sleepTimer.cancelTimer()
       nativeModeStop()
       setIsPlaying(false)
       audioDiag('native-mode', 'native drone stop')
@@ -1268,6 +1288,8 @@ function App() {
   }
 
   const activeAtmosphere = getAtmosphere(atmosphereId)
+  const statusBase = isPlaying ? 'Drone Active' : isDroneStarting ? 'Starting…' : 'Ready'
+  const statusSuffix = sleepTimer.formatStatusSuffix()
 
   return (
     <main
@@ -1294,7 +1316,7 @@ function App() {
       </div>
 
       <div className="app-stack">
-        <h1 id="app-title" className="visually-hidden">Drune</h1>
+        <h1 id="app-title" className="visually-hidden">Moondrone</h1>
 
         <header className="app-header">
           <span
@@ -1302,7 +1324,10 @@ function App() {
             aria-live="polite"
           >
             <span className="status-dot" aria-hidden="true" />
-            {isPlaying ? 'Drone Active' : isDroneStarting ? 'Starting…' : 'Ready'}
+            {statusBase}
+            {statusSuffix ? (
+              <span className="status-timer-suffix">{statusSuffix}</span>
+            ) : null}
           </span>
 
           <div className="header-actions">
@@ -1317,6 +1342,15 @@ function App() {
             />
 
             <AtmosphereSelector atmosphereId={atmosphereId} onChange={setAtmosphereId} />
+
+            <SleepTimerMenu
+              enabled={sleepTimer.enabled}
+              supported={sleepTimer.supported}
+              isActive={sleepTimer.isActive}
+              selectedDurationSeconds={sleepTimer.selectedDurationSeconds}
+              triggerAriaLabel={sleepTimer.triggerAriaLabel}
+              onSelectDuration={sleepTimer.selectDuration}
+            />
 
             <button
               type="button"

@@ -39,6 +39,10 @@ import {
   setNativeMetronomeSoundMode,
   setNativeToneLab,
   stopNativeDrone,
+  setNativeSleepTimer,
+  cancelNativeSleepTimer,
+  getNativeSleepTimerState,
+  addNativeSleepTimerListener as registerNativeSleepTimerListener,
 } from './nativeDroneExperiment'
 
 const STORAGE_KEY = 'moondrone.nativeMode'
@@ -326,6 +330,29 @@ export function nativeModeSetMetronomeSoundMode(soundMode) {
 // the error-safe transport. Never touches the Tone.js engine or metronome.
 export function nativeModeSetToneLab(settings = {}) {
   return safe(setNativeToneLab(settings))
+}
+
+export function nativeModeSetSleepTimer(durationSeconds) {
+  const seconds = Number(durationSeconds)
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return Promise.resolve(null)
+  }
+  return safe(setNativeSleepTimer(seconds))
+}
+
+export function nativeModeCancelSleepTimer() {
+  return safe(cancelNativeSleepTimer())
+}
+
+export function nativeModeGetSleepTimerState() {
+  return safe(getNativeSleepTimerState())
+}
+
+export function addNativeSleepTimerListener(callback) {
+  if (!Capacitor.isNativePlatform() || typeof callback !== 'function') {
+    return () => {}
+  }
+  return registerNativeSleepTimerListener(callback)
 }
 
 function clamp01(value) {

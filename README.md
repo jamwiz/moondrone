@@ -1,4 +1,4 @@
-# Drune
+# Moondrone
 
 Beautiful drones for practice and meditation.
 
@@ -150,7 +150,7 @@ The panel remembers open/closed state for the browser session (`sessionStorage` 
 
 ## Mobile App (Capacitor)
 
-Drune is wrapped with Capacitor. The Vite build output (`dist/`) is synced into native `android/` and `ios/` projects.
+Moondrone is wrapped with Capacitor. The Vite build output (`dist/`) is synced into native `android/` and `ios/` projects.
 
 ```bash
 npm run cap:sync              # build + sync web assets to native projects

@@ -158,6 +158,46 @@ export async function setNativeToneLab(settings = {}) {
   return result
 }
 
+// ---- Native sleep timer (Native Mode only) -------------------------------------------------
+export async function setNativeSleepTimer(durationSeconds) {
+  const result = await NativeDrone.setNativeSleepTimer({ durationSeconds })
+  console.log('[NativeDrone] setNativeSleepTimer ->', result)
+  return result
+}
+
+export async function cancelNativeSleepTimer() {
+  const result = await NativeDrone.cancelNativeSleepTimer()
+  console.log('[NativeDrone] cancelNativeSleepTimer ->', result)
+  return result
+}
+
+export async function getNativeSleepTimerState() {
+  return await NativeDrone.getNativeSleepTimerState()
+}
+
+export function addNativeSleepTimerListener(callback) {
+  if (!Capacitor.isNativePlatform()) {
+    return () => {}
+  }
+  const handles = []
+  const events = ['nativeSleepTimerStateChanged', 'nativeSleepTimerExpired']
+  for (const eventName of events) {
+    const promise = NativeDrone.addListener(eventName, (data) => {
+      try {
+        callback(eventName, data)
+      } catch {
+        // ignore listener failures
+      }
+    })
+    handles.push(promise)
+  }
+  return () => {
+    for (const promise of handles) {
+      promise.then((handle) => handle.remove()).catch(() => {})
+    }
+  }
+}
+
 // Console API so the native engine can be driven separately from the real engine:
 //   moondroneNativeDrone.start(0.2)
 //   moondroneNativeDrone.setFrequency(146.83)   // D3
@@ -189,5 +229,18 @@ if (typeof window !== 'undefined') {
     setMetronomeSoundMode: setNativeMetronomeSoundMode,
     isAvailable: isNativeDroneAvailable,
     DEFAULT_PARTIALS: NATIVE_DRONE_DEFAULT_PARTIALS,
+    setSleepTimer: setNativeSleepTimer,
+    cancelSleepTimer: cancelNativeSleepTimer,
+    getSleepTimerState: getNativeSleepTimerState,
+  }
+
+  if (import.meta.env.DEV) {
+    // Debug: set a short sleep timer without exposing it in the production menu.
+    // Example: window.moondroneNativeDrone.setSleepTimer(30)
+    window.moondroneNativeSleepTimerDebug = {
+      setSeconds: (seconds) => setNativeSleepTimer(seconds),
+      cancel: () => cancelNativeSleepTimer(),
+      state: () => getNativeSleepTimerState(),
+    }
   }
 }

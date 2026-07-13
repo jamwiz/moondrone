@@ -797,6 +797,24 @@ final class NativeDroneEngine {
     private var metNoiseEnv = 0.0
     private var metNoiseDecay = 0.0
 
+    // ---- Native sleep timer (authoritative; evaluated on the render thread) ------------------
+    private enum SleepTimerStatus: Int {
+        case off = 0, armed = 1, running = 2, fading = 3
+    }
+    private static let sleepFadeSeconds = 30.0
+    private static let sleepRestoreRampSeconds = 0.375
+    private var sleepDurationSeconds: Double = 0
+    private var sleepStatus: SleepTimerStatus = .off
+    private var sleepDeadlineUptime: Double = 0
+    private var sleepExpirationGeneration: UInt64 = 0
+    private var sleepExpirationDispatched = false
+    private var sleepFadeNotified = false
+    private var sleepRestoreActive = false
+    private var sleepGain: Double = 1.0
+    private var lastStopReason: String? = nil
+    /// Plugin bridge: (eventName, payload). Never called from the render callback.
+    var onSleepTimerEvent: ((String, [String: Any]) -> Void)?
+
     // Debug snapshot values written on the render thread (benign race on read).
     private var dbgBreathPhase = 0.0
     private var dbgBreathAmount = 0.0
@@ -852,12 +870,14 @@ final class NativeDroneEngine {
         // back up from the current level rather than restarting cold.
         stopFadeActive = false
         runGeneration += 1
+        prepareSleepTimerForAudioStart()
         // A start() is a user drone start by default. startMetronome() calls start(volume: 0) to
         // spin up a click-only engine and immediately clears this again (see startMetronome).
         droneUserPlaying = true
         if isRunning {
             if let volume = volume { targetVolume = clamp01(Double(volume)) }
             startupFadeActive = true   // musical swell back up (no hard snap)
+            activateArmedSleepTimerIfNeeded()
             return
         }
 
@@ -1233,6 +1253,52 @@ final class NativeDroneEngine {
             let resoFc = min(sr * 0.45, fcBaseBuf * self.intensityFilterMult(Double(self.currentIntensity)))
             self.resonancePeak.setPeaking(resoFc, 0.9 + resoAmt * 0.6, resoAmt * 4.0, sr)
 
+            // ---- Sleep timer: monotonic deadline + 30 s fade (control rate, once per buffer). ----
+            let uptime = ProcessInfo.processInfo.systemUptime
+            var sleepGainStart = self.sleepGain
+            var sleepGainEnd = self.sleepGain
+            var bufferSleepExpired = false
+            if self.sleepRestoreActive {
+                let restoreDelta = Double(frameCount) / (NativeDroneEngine.sleepRestoreRampSeconds * sr)
+                sleepGainEnd = min(1.0, self.sleepGain + restoreDelta)
+                if sleepGainEnd >= 0.999 {
+                    sleepGainEnd = 1.0
+                    self.sleepRestoreActive = false
+                }
+            } else if self.sleepStatus == .running || self.sleepStatus == .fading {
+                let remaining = self.sleepDeadlineUptime - uptime
+                if remaining <= 0 {
+                    sleepGainStart = 0.0
+                    sleepGainEnd = 0.0
+                    bufferSleepExpired = true
+                } else if remaining <= NativeDroneEngine.sleepFadeSeconds {
+                    if self.sleepStatus == .running {
+                        self.sleepStatus = .fading
+                        if !self.sleepFadeNotified {
+                            self.sleepFadeNotified = true
+                            DispatchQueue.main.async { [weak self] in
+                                self?.emitSleepTimerStateChanged()
+                            }
+                        }
+                    }
+                    sleepGainStart = max(0.0, min(1.0, remaining / NativeDroneEngine.sleepFadeSeconds))
+                    let remainingEnd = remaining - Double(frameCount) / sr
+                    sleepGainEnd = max(0.0, min(1.0, remainingEnd / NativeDroneEngine.sleepFadeSeconds))
+                    if remainingEnd <= 0 {
+                        sleepGainEnd = 0.0
+                        bufferSleepExpired = true
+                    }
+                } else {
+                    sleepGainStart = 1.0
+                    sleepGainEnd = 1.0
+                }
+            } else {
+                sleepGainStart = 1.0
+                sleepGainEnd = 1.0
+            }
+            self.sleepGain = sleepGainStart
+            let sleepGainStep = (sleepGainEnd - sleepGainStart) / Double(max(1, Int(frameCount)))
+
             for frame in 0..<Int(frameCount) {
                 // Master volume: musical swell at cold start, gentle fade-out on Stop, otherwise
                 // the snappy ampCoeff so the volume slider stays responsive.
@@ -1559,11 +1625,22 @@ final class NativeDroneEngine {
                 // drive is separate, so the click stays audible at any drone volume (incl. 0).
                 click *= self.curMetVolume
                 // Master: smoothed register trim + makeup gain + tanh soft-clip limiter.
+                // Sleep gain multiplies the combined drone+click output (independent of master volume).
                 let drive = Double(self.currentVolume) * 1.68 * 1.1 * self.curRegTrim * toneLabTrimLin
-                let sl = Float(tanh(left * drive + click) * 0.97)
-                let sr2 = Float(tanh(right * drive + click) * 0.97)
+                let sleepG = self.sleepGain
+                let sl = Float(tanh((left * drive + click) * sleepG) * 0.97)
+                let sr2 = Float(tanh((right * drive + click) * sleepG) * 0.97)
+                self.sleepGain += sleepGainStep
+                if self.sleepGain < 0 { self.sleepGain = 0 }
                 leftPtr?[frame] = sl
                 rightPtr?[frame] = rightPtr != nil ? sr2 : sl
+            }
+            if bufferSleepExpired && !self.sleepExpirationDispatched {
+                self.sleepExpirationDispatched = true
+                let gen = self.sleepExpirationGeneration
+                DispatchQueue.main.async { [weak self] in
+                    self?.finalizeSleepTimerExpiration(generation: gen)
+                }
             }
             return noErr
         }
@@ -1574,6 +1651,7 @@ final class NativeDroneEngine {
         engine.prepare()
         try engine.start()
         isRunning = true
+        activateArmedSleepTimerIfNeeded()
         print("⚡️ [NativeDrone] engine started (preset \(presetName), targetVolume \(targetVolume))")
     }
 
@@ -1826,11 +1904,13 @@ final class NativeDroneEngine {
         metSoundMode = soundMode
         metRestartPending = true
         metronomeEnabled = true
+        prepareSleepTimerForAudioStart()
         if !isRunning {
             metStartedEngine = true
             try? start(volume: 0.0)   // drone bed silent; only the click sounds
             droneUserPlaying = false  // start() set this true; the metronome, not the user, started it
         }
+        activateArmedSleepTimerIfNeeded()
     }
 
     /// Stop the native metronome only. The in-flight click envelope decays naturally (no pop). The
@@ -1842,6 +1922,7 @@ final class NativeDroneEngine {
         metRestartPending = false
         metStartedEngine = false
         if !droneUserPlaying {
+            cancelSleepTimerIfNoAudio()
             stop()   // nothing else needs the engine → musical fade + deferred teardown
         }
     }
@@ -1976,6 +2057,159 @@ final class NativeDroneEngine {
         useCustomPartials = true
     }
 
+    // ---- Native sleep timer API (main thread) -----------------------------------------------
+    private func isNativeAudioActive() -> Bool {
+        return droneUserPlaying || metronomeEnabled
+    }
+
+    private func sleepTimerSnapshotFields() -> [String: Any] {
+        let uptime = ProcessInfo.processInfo.systemUptime
+        var remaining: Double = 0
+        if sleepStatus == .running || sleepStatus == .fading {
+            remaining = max(0.0, sleepDeadlineUptime - uptime)
+        }
+        let statusName: String
+        switch sleepStatus {
+        case .off: statusName = "off"
+        case .armed: statusName = "armed"
+        case .running: statusName = "running"
+        case .fading: statusName = "fading"
+        }
+        return [
+            "sleepTimerStatus": statusName,
+            "sleepTimerDurationSeconds": sleepDurationSeconds,
+            "sleepTimerRemainingSeconds": remaining,
+            "sleepTimerFadeSeconds": NativeDroneEngine.sleepFadeSeconds,
+            "sleepTimerGain": sleepGain,
+            "sleepTimerArmed": sleepStatus == .armed,
+            "sleepTimerRunning": sleepStatus == .running,
+            "sleepTimerFading": sleepStatus == .fading,
+            "sleepTimerDidExpire": lastStopReason == "sleep-timer",
+            "lastStopReason": lastStopReason as Any,
+        ]
+    }
+
+    private func emitSleepTimerStateChanged() {
+        onSleepTimerEvent?("nativeSleepTimerStateChanged", sleepTimerSnapshotFields())
+    }
+
+    /// Arm or start the sleep timer. If native audio is active, countdown begins immediately.
+    func setSleepTimer(durationSeconds: Double) {
+        let dur = max(1.0, durationSeconds)
+        sleepExpirationGeneration &+= 1
+        sleepExpirationDispatched = false
+        sleepDurationSeconds = dur
+        lastStopReason = nil
+        if isNativeAudioActive() {
+            sleepStatus = .running
+            sleepDeadlineUptime = ProcessInfo.processInfo.systemUptime + dur
+            sleepFadeNotified = false
+            if sleepGain < 0.999 {
+                sleepRestoreActive = true
+            } else {
+                sleepGain = 1.0
+                sleepRestoreActive = false
+            }
+        } else {
+            sleepStatus = .armed
+            sleepDeadlineUptime = 0
+            sleepGain = 1.0
+            sleepRestoreActive = false
+            sleepFadeNotified = false
+        }
+        emitSleepTimerStateChanged()
+    }
+
+    /// Cancel the sleep timer without stopping audio. During fade, output restores smoothly.
+    func cancelSleepTimer() {
+        guard sleepStatus != .off else { return }
+        sleepExpirationGeneration &+= 1
+        sleepExpirationDispatched = false
+        sleepStatus = .off
+        sleepDurationSeconds = 0
+        sleepDeadlineUptime = 0
+        sleepFadeNotified = false
+        if sleepGain < 0.999 {
+            sleepRestoreActive = true
+        } else {
+            sleepGain = 1.0
+            sleepRestoreActive = false
+        }
+        emitSleepTimerStateChanged()
+    }
+
+    func getSleepTimerState() -> [String: Any] {
+        return sleepTimerSnapshotFields()
+    }
+
+    /// Convert an armed timer to running when native audio starts.
+    private func activateArmedSleepTimerIfNeeded() {
+        guard sleepStatus == .armed, sleepDurationSeconds > 0 else { return }
+        sleepStatus = .running
+        sleepDeadlineUptime = ProcessInfo.processInfo.systemUptime + sleepDurationSeconds
+        sleepGain = 1.0
+        sleepRestoreActive = false
+        sleepFadeNotified = false
+        sleepExpirationDispatched = false
+        emitSleepTimerStateChanged()
+    }
+
+    /// Invalidate stale expiration callbacks and reset output gain for a fresh session.
+    private func prepareSleepTimerForAudioStart() {
+        if sleepStatus == .off {
+            sleepExpirationGeneration &+= 1
+            sleepExpirationDispatched = false
+            sleepGain = 1.0
+            sleepRestoreActive = false
+        }
+    }
+
+    /// Tear down all native audio after the sleep fade reached silence. Main thread only.
+    private func finalizeSleepTimerExpiration(generation: UInt64) {
+        guard generation == sleepExpirationGeneration else { return }
+        guard sleepStatus == .running || sleepStatus == .fading else { return }
+        // Render thread set sleepExpirationDispatched before dispatching here (once-only).
+        guard sleepExpirationDispatched else { return }
+        sleepExpirationGeneration &+= 1
+
+        droneUserPlaying = false
+        metronomeEnabled = false
+        metRestartPending = false
+        metStartedEngine = false
+        metClickEnv = 0.0
+        metNoiseEnv = 0.0
+        metBeatIndex = 0
+        metFramesToNext = 0
+        stopFadeActive = false
+        startupFadeActive = false
+        runGeneration &+= 1
+
+        isRunning = false
+        let node = sourceNode
+        sourceNode = nil
+        engine.stop()
+        if let node = node { engine.detach(node) }
+
+        sleepStatus = .off
+        sleepDurationSeconds = 0
+        sleepDeadlineUptime = 0
+        sleepGain = 1.0
+        sleepRestoreActive = false
+        sleepFadeNotified = false
+        lastStopReason = "sleep-timer"
+
+        print("⚡️ [NativeDrone] sleep timer expired — engine stopped")
+        onSleepTimerEvent?("nativeSleepTimerExpired", sleepTimerSnapshotFields())
+        emitSleepTimerStateChanged()
+    }
+
+    /// Cancel the timer when no native audio remains (metronome-only stop path).
+    private func cancelSleepTimerIfNoAudio() {
+        if !isNativeAudioActive() && sleepStatus != .off {
+            cancelSleepTimer()
+        }
+    }
+
     func snapshot() -> [String: Any] {
         return [
             "isRunning": isRunning,
@@ -2063,7 +2297,7 @@ final class NativeDroneEngine {
             "moodPitchFollowSeconds": max(0.18, 1.9 * pow(0.11, curMoodPitchFollow)),
             "nativeMetronomeVolume": curMetVolume,
             "nativeMetronomeTone": curMetTone,
-        ]
+        ].merging(sleepTimerSnapshotFields()) { _, new in new }
     }
 }
 
@@ -2092,10 +2326,20 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "setNativeMetronomeBpm", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setNativeMetronomeMeter", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "setNativeMetronomeSoundMode", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "setNativeToneLab", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "setNativeToneLab", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setNativeSleepTimer", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "cancelNativeSleepTimer", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "getNativeSleepTimerState", returnType: CAPPluginReturnPromise)
     ]
 
     private let drone = NativeDroneEngine()
+
+    public override func load() {
+        super.load()
+        drone.onSleepTimerEvent = { [weak self] event, data in
+            self?.notifyListeners(event, data: data)
+        }
+    }
 
     @objc func startNativeDrone(_ call: CAPPluginCall) {
         print("⚡️ [NativeDrone] startNativeDrone ENTERED (native Swift)")
@@ -2363,6 +2607,31 @@ public class NativeDronePlugin: CAPPlugin, CAPBridgedPlugin {
             nativeMetronomeTone: call.getDouble("nativeMetronomeTone")
         )
         call.resolve(["state": drone.snapshot()])
+    }
+
+    // ---- Native sleep timer (Native Mode only) -----------------------------------------------
+    @objc func setNativeSleepTimer(_ call: CAPPluginCall) {
+        guard let durationSeconds = call.getDouble("durationSeconds"), durationSeconds > 0 else {
+            call.reject("setNativeSleepTimer requires a positive numeric 'durationSeconds'")
+            return
+        }
+        DispatchQueue.main.async {
+            self.drone.setSleepTimer(durationSeconds: durationSeconds)
+            call.resolve(self.drone.getSleepTimerState())
+        }
+    }
+
+    @objc func cancelNativeSleepTimer(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            self.drone.cancelSleepTimer()
+            call.resolve(self.drone.getSleepTimerState())
+        }
+    }
+
+    @objc func getNativeSleepTimerState(_ call: CAPPluginCall) {
+        DispatchQueue.main.async {
+            call.resolve(self.drone.getSleepTimerState())
+        }
     }
 }
 // =============================================================================
