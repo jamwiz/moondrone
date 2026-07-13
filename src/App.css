@@ -1174,6 +1174,10 @@
 
 /* ---------- Header metronome popover ---------- */
 
+.metronome-menu {
+  position: relative;
+}
+
 .header-icon-button {
   display: inline-flex;
   align-items: center;
@@ -1252,8 +1256,13 @@
 }
 
 .metronome-popover {
+  right: 0;
+  left: auto;
   gap: 12px;
-  width: min(78vw, 264px);
+  box-sizing: border-box;
+  min-width: 0;
+  width: min(264px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
   padding: 14px;
   border-radius: 20px;
 }
